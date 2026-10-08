@@ -26,8 +26,9 @@ export const register: Register = on => {
     return result
   })
 
-  // Drawn in the hint line under the prompt, after the engine's own hints.
-  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+  // Drawn in the prompt footer's right-hand mode area, beside the model selector, after any
+  // mode labels the engine shows there (`focus`, `memory paused`).
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const base = await next(e)
     const { Box, Button } = $.ui.resolve(e)
     const voice = await read($, isOn)
@@ -39,9 +40,9 @@ export const register: Register = on => {
     const label = voice ? 'Voice on' : 'Voice off'
     const Svg = e.surface === 'terminal' ? undefined : $.ui.resolve(e).Svg
     return (
-      <Box flexDirection="row">
-        <Box flexGrow={1}>{base}</Box>
-        <Box key="voice-row" flexDirection="row" alignItems="center" marginLeft={2}>
+      <Box flexDirection="row" alignItems="center">
+        {base}
+        <Box key="voice-row" flexDirection="row" alignItems="center" marginLeft={1}>
           {Svg && <Svg source={icon(voice)} alt={label} width={14} height={14} />}
           <Button key="voice" label={label} plain dimColor onPress={() => void toggle()} />
         </Box>

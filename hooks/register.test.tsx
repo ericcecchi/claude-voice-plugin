@@ -2,18 +2,18 @@ import { test, expect, mock } from 'claude-code/testing'
 
 const FLAG = '/home/.claude/read-aloud/on/s1'
 
-test('the voice toggle under the prompt shows the state and toggles the flag', async ($, on) => {
+test('the voice toggle in the prompt footer shows the state and toggles the flag', async ($, on) => {
   const files: Record<string, string> = {}
   mock.env(on, { HOME: '/home' })
   mock.clock(on)
-  on('ui.render', ($, e) => { const { Text } = $.ui.resolve(e); return <Text dimColor>? for shortcuts</Text> })
+  on('ui.render', ($, e) => { const { Text } = $.ui.resolve(e); return <Text dimColor>focus</Text> })
   on('session.id', () => ({ value: 's1' }))
   on('fs.exists', ($, e) => ({ value: e.path in files }))
   on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
   on('fs.write', ($, e) => { files[e.path] = e.text; return { value: undefined } })
   for (const surface of ['terminal', 'desktop'] as const) {
     delete files[FLAG]
-    const ui = await $.ui.mount({ plugin: 'read-aloud', surface, component: 'PromptHint', props: { isDraft: false, isWorking: false, hint: '? for shortcuts' } } as never)
+    const ui = await $.ui.mount({ plugin: 'read-aloud', surface, component: 'SessionMode', props: { modes: [] } } as never)
     expect((await ui.find({ key: 'voice' }))?.props.label).toBe('Voice off')
     await ui.press({ key: 'voice' })
     expect(files[FLAG]).toBe('on')
