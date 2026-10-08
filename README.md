@@ -23,7 +23,7 @@ Scheduled tasks and subagents are never read aloud.
 In Claude Code, add this repo as a marketplace, then install the plugin:
 
 ```
-/plugin marketplace add OWNER/claude-voice-plugin
+/plugin marketplace add ericcecchi/claude-voice-plugin
 /plugin install read-aloud@claude-voice
 ```
 
