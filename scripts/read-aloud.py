@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Read-aloud hook: speak Claude's replies out loud.
+
+Off by default; `/read-aloud`, `/read-aloud on`, `/read-aloud off` flip it for the current
+session. Never speaks for scheduled tasks or subagents (Stop fires for the main thread only).
+
+  Stop               the turn's final message, minus code, tables and pleasantries
+  UserPromptSubmit   a short spoken reaction, so there's no dead air while Claude thinks
+  PreToolUse         a heads-up when an AskUserQuestion prompt opens (the question isn't read)
+  PostToolUse        on long tasks, what Claude last wrote between tool calls, once it's been
+                     quiet READ_ALOUD_PROGRESS_GAP seconds (default 20)
+
+Voice: a warm Kokoro server (kokoro-speak-server.py) on ~/.claude/kokoro.sock if one is running,
+otherwise the system's speech command: `say` on macOS, `spd-say` or `espeak` on Linux. A new
+turn's speech cuts off the previous one.
+
+Environment:
+  READ_ALOUD_DIRS          colon-separated folders; if set, speak only when cwd is inside one
+  READ_ALOUD_ACK_MODEL     Claude model for the acknowledgment, via `claude -p` (default haiku);
+                           empty to skip it
+  READ_ALOUD_ACK_WAIT      seconds to wait for that model before the fallback (default 4)
+  READ_ALOUD_OLLAMA_MODEL  local Ollama model, the fallback (default gemma4:e2b); empty to skip it
+  READ_ALOUD_SAY_RATE      words per minute for the system voice (default 210)
+  READ_ALOUD_PROGRESS_GAP  seconds of quiet before a mid-task update (default 20; 0 for every one)
+Each utterance is logged to ~/.claude/read-aloud.log (hook, engine, text).
+Global off switch: touch ~/.claude/read-aloud.off
+"""
+import json, os, random, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, urllib.request
+
+DIRS = [os.path.normpath(os.path.expanduser(d)) + "/"
+        for d in os.environ.get("READ_ALOUD_DIRS", "").split(":") if d.strip()]
+PIDFILE = os.path.expanduser("~/.claude/read-aloud.pid")
+OFF = os.path.expanduser("~/.claude/read-aloud.off")
+SOCK = os.path.expanduser("~/.claude/kokoro.sock")
+LOG = os.path.expanduser("~/.claude/read-aloud.log")
+LAST_SPOKE = os.path.expanduser("~/.claude/read-aloud.last-spoke")  # when anything was last said
+PROGRESS_DIR = os.path.expanduser("~/.claude/read-aloud/progress")  # per session: last block spoken
+PROGRESS_GAP = float(os.environ.get("READ_ALOUD_PROGRESS_GAP", "20"))  # seconds of quiet first
+
+def is_scheduled(transcript_path):
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                msg = d.get("message") if isinstance(d, dict) else None
+                if d.get("type") == "user" and isinstance(msg, dict) and msg.get("role") == "user":
+                    c = msg.get("content")
+                    return "<scheduled-task" in (c if isinstance(c, str) else json.dumps(c))
+    except OSError:
+        pass
+    return True  # can't tell: stay quiet
+
+
+def last_assistant_text(event):
+    """The turn's final message alone. Updates written earlier in the turn were read along the way
+    (or skipped), so they aren't read again here."""
+    blocks = [t for _, t in turn_text_blocks(event.get("transcript_path", ""))]
+    msg = event.get("last_assistant_message")
+    msg = msg if isinstance(msg, str) else ""
+    if blocks and (not msg.strip() or msg.rstrip().endswith(blocks[-1].strip())):
+        return blocks[-1]
+    for earlier in blocks:  # the transcript lags the event: drop the turn's earlier updates from it
+        msg = msg.replace(earlier, "")
+    return msg
+
+
+# Words the voice mispronounces, spelled the way it should be said. Whole words only.
+PRONUNCIATIONS = [
+    (r"\bSOC\s?2\b", "sock two"),  # "soche"
+    (r"(?<!version )\bv(\d+(?:\.\d+)?)\b(?!\.\d)", r"version \1"),  # "v4.1" is "version 4.1", not "vee four one"
+    (r"(?<![\d.])(\d+)\.0\b(?!\.\d)", r"\1 point oh"),  # "2.0" is "two point oh", not "two"
+]
+
+# "read" is a heteronym; guess the tense from the word before it. Default is present ("reed").
+READ_PRESENT = {"will", "would", "can", "could", "should", "must", "may", "might", "to", "please",
+                "do", "does", "don't", "doesn't", "didn't", "won't", "can't", "let", "i'll", "we'll",
+                "you'll", "they'll", "i'd", "we'd", "you'd", "they'd", "and"}
+READ_PAST = {"have", "has", "had", "having", "was", "were", "is", "are", "be", "been", "being",
+             "already", "just", "never", "ever", "once", "i've", "we've", "you've", "they've",
+             "i", "we", "they", "he", "she", "it", "you", "who", "also", "then", "first"}
+
+def say_read(m):
+    prev = (m.group(1) or "").strip().lower().replace("’", "'")
+    if prev in READ_PRESENT:
+        word = "reed"
+    elif prev in READ_PAST:
+        word = "red"
+    else:
+        word = "reed"
+    return (m.group(1) or "") + word
+
+# Spoken when an AskUserQuestion prompt opens mid-turn, varied so it doesn't sound canned. The
+# prompt's question itself isn't read; it's on screen.
+HEADS_UP = [
+    "Got a question for you.",
+    "Quick question when you get a sec.",
+    "I need your call on something.",
+    "Hey, question for you.",
+    "Need a decision from you.",
+    "One thing for you to weigh in on.",
+    "When you have a minute, I've got a question.",
+    "Need your input on something.",
+]
+# Spoken the moment a prompt is sent, so there's no dead air while Claude thinks.
+ACKS = [
+    "On it.",
+    "Okay, give me a sec.",
+    "Sure, one moment.",
+    "Okay, checking.",
+    "Yep, working on it.",
+    "Alright, give me a minute.",
+    "Okay, let me look.",
+    "Heard you. On it.",
+    "Mm, let me see.",
+]
+
+ON_DIR = os.path.expanduser("~/.claude/read-aloud/on")  # one file per session: "on" or "off"
+# `/read-aloud` or the namespaced `/read-aloud:read-aloud`, typed or expanded into <command-name> tags.
+TOGGLE = re.compile(r"^\s*(?:<command-(?:message|name)>[^<]*</command-(?:message|name)>\s*)*?"
+                    r"(?:<command-name>)?/(?:read-aloud:)?read-aloud(?![\w:-])\s*(?:</command-name>)?\s*"
+                    r"(?:<command-args>)?\s*(on|off)?", re.I)
+ACK_MODEL = os.environ.get("READ_ALOUD_ACK_MODEL", "haiku")  # through `claude -p`, on your Claude login
+ACK_WAIT = float(os.environ.get("READ_ALOUD_ACK_WAIT", "4"))  # seconds to wait for Haiku before falling back
+QUICK_MODEL = os.environ.get("READ_ALOUD_OLLAMA_MODEL", "gemma4:e2b")  # local fallback, through Ollama
+QUICK_SYSTEM = (
+    "You're a friendly coworker who just read a message from a teammate and is about to start on it. "
+    "React out loud in one or two short, complete sentences (8 to 18 words in all), the way you'd "
+    "actually talk: first person, contractions, a little warmth, and mention the specific thing they "
+    "brought up in your own words. Not a headline or a ticket title: no clipped fragments like "
+    "'Summary length adjustment needed'. Start straight in, with no 'Hm', 'Okay', 'Right' or other "
+    "lead-in. Never say 'Certainly', 'Sure thing', 'I can help with that', 'Got it', 'Great "
+    "question'. Don't parrot their request back ('You want…', 'I see you want…'). Don't answer it yet, don't ask a question, no emojis, no quotes. Reply with the "
+    "spoken words only. If the message is short or vague, keep your reaction general and never "
+    "borrow details from earlier conversations."
+)
+QUICK_EXAMPLES = [  # shown as earlier turns, so the model copies the tone and not a format
+    ("why is the login test flaky on CI?",
+     "So it only flakes on CI, never locally. That smells like timing, let me dig in."),
+    ("rename the voice command, it collides with the built-in one",
+     "Ah, it's clashing with the built-in one. I'll find it a new name."),
+    ("the summaries are too short, make them longer",
+     "Yeah, they've been cutting off early. I'll let them run longer."),
+    ("add dark mode to the settings page",
+     "Dark mode for the settings page, nice. I'll get that going."),
+    ("so does it work now?", "Let me check whether it's actually working now."),
+]
+# Words only the examples use; a line that has one the prompt doesn't was copied, not meant.
+EXAMPLE_WORDS = {"flaky", "flakes", "locally", "clashing", "built-in", "dark", "login"}
+# A reaction that claims a result ("it's working fine") answers before any work was done.
+CLAIMS = re.compile(r"\b(?:(?:it's|it is|seems to be|looks|is)\s+(?:all\s+)?(?:working|fine|good|fixed|done)|"
+                    r"i (?:just )?(?:tested|checked|fixed|confirmed))\b", re.I)
+# A message that's only thanks or a nod needs no spoken reaction.
+NO_ACK = re.compile(r"^\W*(?:thanks|thank you|thx|ty|cool|nice|great|ok|okay|perfect|awesome|sounds good|"
+                    r"lgtm|yes|yep|no|nope)\W*$", re.I)
+# Openers that sound canned, dropped from the front of the model's line.
+STOCK_OPENERS = re.compile(r"^(?:(?:got it|certainly|sure thing|sure|absolutely|of course|understood|"
+                           r"great question|no problem|hm+|mm+|okay|ok|right|ah|oh|alright|so|well)"
+                           r"\b[\s,.!:;-]*)+", re.I)
+# The lead-in is chosen here, never the same twice running; often none at all.
+LEAD_INS = ["", "", "", "Hm, ", "Okay, ", "Ah, ", "Right, ", "Oh, ", "Mm, ", "Alright, ", "So, "]
+
+
+def quick_reply(prompt):
+    """A short spoken reaction that fits the prompt: Haiku if it answers in time, else the local
+    model, else a canned line. Both models are asked at once, so a slow Haiku costs nothing."""
+    results = {}
+    def run(name, ask):
+        try:
+            results[name] = _usable(ask(prompt), prompt)
+        except Exception:
+            results[name] = ""
+    threads = [threading.Thread(target=run, args=(n, f), daemon=True)
+               for n, f in (("claude", _ask_claude), ("ollama", _ask_ollama))]
+    for t in threads:
+        t.start()
+    deadline = time.time() + ACK_WAIT
+    threads[0].join(max(0.0, deadline - time.time()))
+    line = results.get("claude")
+    if not line:
+        threads[1].join(max(0.0, min(deadline, time.time() + 1) - time.time()))
+        line = results.get("ollama")
+    if not line:
+        return pick(ACKS, "ack")
+    lead = pick(LEAD_INS, "lead-in") if random.random() < 0.6 else ""
+    keep_case = not lead or line[:2].isupper() or line.startswith(("I ", "I'"))
+    return lead + (line[0] if keep_case else line[0].lower()) + line[1:]
+
+
+def _ask_claude(prompt):
+    """Haiku through `claude -p`, stripped down so it starts in about a second."""
+    if not ACK_MODEL or not shutil.which("claude"):
+        return ""
+    examples = "\n".join(f"Message: {a}\nYou: {b}" for a, b in QUICK_EXAMPLES)
+    system = f"{QUICK_SYSTEM}\n\nThe tone to aim for (never reuse their details):\n{examples}"
+    env = {**os.environ, "READ_ALOUD_CHILD": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+           "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1"}
+    out = subprocess.run(
+        ["claude", "-p", prompt[:1500], "--model", ACK_MODEL, "--system-prompt", system,
+         "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--tools", "",
+         "--no-session-persistence", "--effort", "low"],
+        capture_output=True, text=True, timeout=ACK_WAIT + 1, env=env, cwd=tempfile.gettempdir())
+    return out.stdout if out.returncode == 0 else ""
+
+
+def _ask_ollama(prompt):
+    if not QUICK_MODEL:
+        return ""
+    messages = [{"role": "system", "content": QUICK_SYSTEM}]
+    for ask, said in QUICK_EXAMPLES:
+        messages += [{"role": "user", "content": ask}, {"role": "assistant", "content": said}]
+    messages.append({"role": "user", "content": prompt[:1500]})
+    body = json.dumps({
+        "model": QUICK_MODEL, "messages": messages, "stream": False, "think": False,
+        "keep_alive": -1, "options": {"num_predict": 45, "temperature": 0.9},
+    }).encode()
+    req = urllib.request.Request("http://127.0.0.1:11434/api/chat", body, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=4) as r:
+        return json.load(r).get("message", {}).get("content", "")
+
+
+def _usable(text, prompt):
+    """The model's line, cleaned, or "" if it isn't a fit reaction to speak."""
+    line = clean(text.strip().splitlines()[0].strip().strip('"')) if text.strip() else ""
+    line = STOCK_OPENERS.sub("", line).strip()
+    line = " ".join(q for q in re.split(r"(?<=[.!?])\s+", line) if not q.endswith("?"))
+    # A line that echoes a request, borrows an example, claims a result, or is too short or long
+    # to be a reaction, isn't one.
+    borrowed = {w for w in re.findall(r"[a-z-]+", line.lower()) if w in EXAMPLE_WORDS} - \
+        set(re.findall(r"[a-z-]+", prompt.lower()))
+    claims = CLAIMS.search(re.sub(r"\b(?:whether|if)\b.*", "", line, flags=re.I))  # "see if it works" is fine
+    if line and not borrowed and not claims and ":" not in line and "->" not in line and 3 <= len(line.split()) <= 24:
+        return line[0].upper() + line[1:]
+    return ""
+
+
+def voice_on(session_id):
+    """The flag file holds "on" or "off" (the voice-toggle mod can write but not delete files)."""
+    try:
+        return bool(session_id) and _read(os.path.join(ON_DIR, session_id)).strip() != "off"
+    except OSError:
+        return False
+
+
+def toggle(event):
+    """Sync UserPromptSubmit hook: `/read-aloud`, `/read-aloud on`, `/read-aloud off` flip read-aloud for this session."""
+    m = TOGGLE.match(event.get("prompt") or "")
+    sid = event.get("session_id") or ""
+    if not m or not sid:
+        return
+    want = {"on": True, "off": False}.get((m.group(1) or "").lower(), not voice_on(sid))
+    os.makedirs(ON_DIR, exist_ok=True)
+    with open(os.path.join(ON_DIR, sid), "w") as f:
+        f.write("on" if want else "off")
+    state = "ON" if want else "OFF"
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
+        f"Read-aloud voice is now {state} for this session. Confirm that in one short sentence."}}))
+
+
+def pick(lines, name):
+    """A random line from lines, never the same one twice in a row."""
+    last_file = os.path.join(os.path.dirname(PIDFILE), f"read-aloud.last-{name}")
+    try:
+        last = _read(last_file).strip()
+    except OSError:
+        last = ""
+    line = random.choice([l for l in lines if l != last])
+    try:
+        with open(last_file, "w") as f:
+            f.write(line)
+    except OSError:
+        pass
+    return line
+
+
+def clean(line):
+    """One markdown line as plain speech, or "" for lines that shouldn't be spoken."""
+    line = line.strip()
+    if not line or line.startswith(("```", "|", "---", "#")):
+        return ""
+    line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)  # [text](url) -> text
+    line = re.sub(r"https?://\S+", "", line)
+    line = re.sub(r"^(#+|[-*]|\d+\.)\s+", "", line)       # heading, bullet, list number
+    line = re.sub(r"[`*_>#]", "", line).strip()
+    for pattern, spoken in PRONUNCIATIONS:
+        line = re.sub(pattern, spoken, line, flags=re.IGNORECASE)
+    line = re.sub(r"(\b[\w'’]+\s+)?\bread\b", say_read, line, flags=re.IGNORECASE)
+    return line
+
+
+# Sentences that carry no content when heard: pleasantries, sign-offs, throat-clearing.
+FLUFF = re.compile(
+    r"^(?:(?:great|good) question|thanks|thank you|happy to help|glad (?:to|that|it)|hope (?:this|that) helps|"
+    r"let me know if|feel free to|i hope|sure[,!.]|of course[,!.]|absolutely[,!.]|no problem|"
+    r"here(?:'s| is) (?:what|the|a) (?:summary|rundown|breakdown)|in summary|to summari[sz]e|"
+    r"as (?:mentioned|noted) (?:above|earlier)|hopefully)\b", re.I)
+
+
+def _words(sentence):
+    return set(re.findall(r"[a-z0-9']+", sentence.lower()))
+
+
+def summarize(text):
+    """The reply as speech: every paragraph and list item, minus what doesn't belong out loud.
+
+    No length cap: it grows with the reply. Dropped are code blocks, tables, headings, URLs,
+    pleasantries and sign-offs, and sentences that repeat one already said. A long inline code
+    span (a command, a path) becomes its last part, so `scripts/read-aloud.py` is "read-aloud.py".
+    """
+    out, seen, in_code = [], [], False
+    for raw in text.splitlines():
+        if raw.strip().startswith(("```", "|")):
+            if out and out[-1].endswith(":"):
+                out.pop()  # "Run this:" introduces what isn't read, so it goes too
+                seen.pop()
+            if raw.strip().startswith("```"):
+                in_code = not in_code
+            continue
+        if in_code:
+            continue
+        raw = re.sub(r"`([^`]*)`", lambda m: _speakable_code(m.group(1)), raw)
+        line = clean(raw)
+        if not line:
+            continue
+        if not re.search(r"[.!?:;]$", line):
+            line += "."  # a list item or a fragment still gets its pause
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            sentence = sentence.strip()
+            if not sentence or FLUFF.match(sentence):
+                continue
+            w = _words(sentence)
+            if w and any(len(w & s) / len(w | s) > 0.8 for s in seen):
+                continue  # says again what was already said
+            seen.append(w)
+            out.append(sentence)
+    return " ".join(out)
+
+
+def lead_paragraph(text):
+    """The first paragraph alone, as speech; what a mid-task update says."""
+    para = re.split(r"\n\s*\n", text.strip(), maxsplit=1)[0]
+    return summarize(para)
+
+
+def _speakable_code(code):
+    """Inline code as it should sound: short spans as they are, paths and commands by their tail."""
+    code = code.strip()
+    if len(code) <= 24 and " " not in code:
+        return code.rsplit("/", 1)[-1] or code
+    if "/" in code and " " not in code:
+        return code.rstrip("/").rsplit("/", 1)[-1]
+    return code if len(code) <= 40 else ""
+
+
+def _read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def log(kind, engine, text):
+    """One line per utterance in ~/.claude/read-aloud.log: which hook, which engine, what was said."""
+    try:
+        with open(LOG, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {kind:<8} {engine:<6} {text[:200]}\n")
+    except OSError:
+        pass
+
+
+def speak(s, kind="reply"):
+    try:  # a fallback `say` still talking; the pid file goes once it's used, so a reused pid is safe
+        pid = int(_read(PIDFILE))
+        os.unlink(PIDFILE)
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open(LAST_SPOKE, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+    try:  # the warm Kokoro server (kokoro-speak-server.py); it cuts off its own previous speech
+        k = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        k.settimeout(2)
+        k.connect(SOCK)
+        k.sendall(s.encode("utf-8"))
+        k.close()
+        log(kind, "kokoro", s)
+        return
+    except OSError:
+        pass
+    argv = tts_command(s)
+    if not argv:
+        log(kind, "none", "no speech engine found (say, spd-say or espeak)")
+        return
+    p = subprocess.Popen(argv, start_new_session=True)
+    with open(PIDFILE, "w") as f:
+        f.write(str(p.pid))
+    log(kind, os.path.basename(argv[0]), s)
+
+
+def tts_command(s):
+    """The system's own speech command: `say` on macOS, `spd-say` or `espeak` on Linux."""
+    wpm = int(os.environ.get("READ_ALOUD_SAY_RATE", "210"))  # 1.2x the usual 175 wpm
+    if shutil.which("say"):
+        return ["say", "-r", str(wpm), s]
+    if shutil.which("spd-say"):  # rate is -100..100 around its default; -w waits so the pid lives
+        return ["spd-say", "-w", "-r", str(max(-100, min(100, round((wpm - 175) / 175 * 100)))), s]
+    for espeak in ("espeak-ng", "espeak"):
+        if shutil.which(espeak):
+            return [espeak, "-s", str(wpm), s]
+    return None
+
+
+def turn_text_blocks(transcript_path):
+    """[(uuid, text)] for each assistant text block in the current turn, oldest first."""
+    blocks = []
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                msg = d.get("message") if isinstance(d, dict) else None
+                if not isinstance(msg, dict):
+                    continue
+                if d.get("type") == "user" and isinstance(msg.get("content"), str):
+                    blocks = []  # a real user prompt starts a new turn
+                elif d.get("type") == "assistant":
+                    for i, b in enumerate(msg.get("content") or []):
+                        if isinstance(b, dict) and b.get("type") == "text" and b.get("text", "").strip():
+                            blocks.append((f"{d.get('uuid')}:{i}", b["text"]))
+    except OSError:
+        pass
+    return blocks
+
+
+def progress(event):
+    """Mid-turn: speak the newest thing Claude wrote between tool calls, if it's new and the
+    speaker has been quiet a while, so a long task isn't silent and a short one isn't chatty."""
+    if event.get("agent_id"):
+        return  # a subagent's tool call; its text isn't the main thread's
+    blocks = turn_text_blocks(event.get("transcript_path", ""))
+    if not blocks:
+        return
+    key, text = blocks[-1]
+    sid = event.get("session_id") or ""
+    seen_file = os.path.join(PROGRESS_DIR, sid)
+    try:
+        if _read(seen_file).strip() == key:
+            return
+    except OSError:
+        pass
+    try:
+        quiet_for = time.time() - float(_read(LAST_SPOKE))
+    except (OSError, ValueError):
+        quiet_for = PROGRESS_GAP
+    if quiet_for < PROGRESS_GAP:
+        return
+    line = lead_paragraph(text)
+    if not line:
+        return
+    os.makedirs(PROGRESS_DIR, exist_ok=True)
+    with open(seen_file, "w") as f:
+        f.write(key)
+    speak(line, "progress")
+
+
+def spoke_since(t):
+    try:
+        return float(_read(LAST_SPOKE)) > t
+    except (OSError, ValueError):
+        return False
+
+
+def main():
+    started = time.time()
+    if os.environ.get("READ_ALOUD_CHILD") or os.path.exists(OFF):
+        return
+    event = json.load(sys.stdin)
+    if sys.argv[1:] == ["toggle"]:
+        return toggle(event)
+    if not voice_on(event.get("session_id")):
+        return  # off by default; `/read-aloud` turns it on for this session
+    cwd = os.path.normpath(event.get("cwd") or os.getcwd()) + "/"
+    if DIRS and not any(cwd.startswith(d) for d in DIRS):
+        return
+    if is_scheduled(event.get("transcript_path", "")):
+        return
+    hook = event.get("hook_event_name")
+    if hook == "PreToolUse":  # AskUserQuestion: a heads-up, not the question
+        speak(pick(HEADS_UP, "heads-up"), "question")
+        return
+    if hook == "PostToolUse":
+        return progress(event)
+    if hook == "UserPromptSubmit":  # acknowledge right away, before Claude starts thinking
+        prompt = event.get("prompt") or ""
+        if not prompt.lstrip().startswith(("/", "<command", "<bash-", "!")) and not NO_ACK.match(prompt):
+            line = quick_reply(prompt)
+            # A person takes a beat to read before reacting: about a second, longer for longer
+            # prompts, never the same twice. Kokoro's own synthesis adds a little on top.
+            beat = random.uniform(1.6, 2.5) + min(len(prompt.split()), 80) * 0.015
+            time.sleep(max(0.0, beat - (time.time() - started)))
+            if spoke_since(started):
+                return  # Claude already answered (or something else spoke); don't talk over it
+            speak(line, "ack")
+        return
+    text = last_assistant_text(event)
+    spoken = summarize(text) if text.strip() else ""
+    if spoken:
+        speak(spoken)
+    else:
+        log("reply", "-", f"nothing to say (reply was {len(text)} chars)")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:  # never disturb the session, but leave a trace
+        import traceback
+        where = traceback.extract_tb(e.__traceback__)[-1]
+        log("error", "-", f"{type(e).__name__}: {e} (line {where.lineno})")
