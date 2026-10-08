@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { Register } from 'claude-code'
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 // The read-aloud hook (scripts/read-aloud.py) speaks only when
 // ~/.claude/read-aloud/on/<session id> holds "on". `/read-aloud` and this toggle both write it.
@@ -12,6 +12,24 @@ const WAVES = '<path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 
 const CROSS = '<path d="M22 9l-6 6"/><path d="M16 9l6 6"/>'
 const icon = (on: boolean) =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b8b86" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${SPEAKER}${on ? WAVES : CROSS}</svg>`
+
+// The button itself, the same wherever it's drawn.
+async function control($: EngineInterface, e: RenderInput<'SessionMode' | 'AbovePrompt'>) {
+  const { Box, Button, Svg } = $.ui.resolve(e)
+  const voice = await read($, isOn)
+  const toggle = async () => {
+    const flag = `${await $.env.get('HOME')}/.claude/read-aloud/on/${await $.session.id()}`
+    await $.fs.write(flag, voice ? 'off' : 'on')
+    await update($, isOn, () => !voice)
+  }
+  const label = voice ? 'Voice on' : 'Voice off'
+  return (
+    <Box key="voice-row" flexDirection="row" alignItems="center">
+      {e.surface !== 'terminal' && Svg && <Svg source={icon(voice)} alt={label} width={14} height={14} />}
+      <Button key="voice" label={label} plain dimColor onPress={() => void toggle()} />
+    </Box>
+  )
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -26,26 +44,27 @@ export const register: Register = on => {
     return result
   })
 
-  // Drawn in the prompt footer's right-hand mode area, beside the model selector, after any
-  // mode labels the engine shows there (`focus`, `memory paused`).
+  // Terminal: in the prompt footer's right-hand mode area, after any mode labels (`focus`).
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const base = await next(e)
-    const { Box, Button } = $.ui.resolve(e)
-    const voice = await read($, isOn)
-    const toggle = async () => {
-      const flag = `${await $.env.get('HOME')}/.claude/read-aloud/on/${await $.session.id()}`
-      await $.fs.write(flag, voice ? 'off' : 'on')
-      await update($, isOn, () => !voice)
-    }
-    const label = voice ? 'Voice on' : 'Voice off'
-    const Svg = e.surface === 'terminal' ? undefined : $.ui.resolve(e).Svg
+    if (e.surface !== 'terminal') return base
+    const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" alignItems="center">
         {base}
-        <Box key="voice-row" flexDirection="row" alignItems="center" marginLeft={1}>
-          {Svg && <Svg source={icon(voice)} alt={label} width={14} height={14} />}
-          <Button key="voice" label={label} plain dimColor onPress={() => void toggle()} />
-        </Box>
+        <Box marginLeft={1}>{await control($, e)}</Box>
+      </Box>
+    )
+  })
+
+  // Desktop and other surfaces: the footer slots aren't on screen there, so the button sits in
+  // the band just above the prompt, at its right edge. It gives way to a survey.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface === 'terminal' || e.props.hasSurvey) return next(e)
+    const { Box } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" justifyContent="flex-end">
+        {await control($, e)}
       </Box>
     )
   })
