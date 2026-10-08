@@ -10,11 +10,12 @@ Needs a Python venv with `kokoro soundfile numpy torch` and `brew install espeak
 README for a launchd job that keeps it running.
 
 Environment:
-  KOKORO_VOICE   voice id (default bm_fable); the first letter picks the language (a US, b UK)
+  KOKORO_VOICE   default voice (af_heart); `/read-aloud voice` overrides it. a… US, b… UK English
   KOKORO_SPEED   speaking speed (default 1.2); `/read-aloud speed` overrides it
   KOKORO_DEVICE  cpu (default) or mps; cpu sounds cleaner and is faster here
   ESPEAK_PREFIX  where espeak-ng is installed (default: `brew --prefix espeak-ng`)
 """
+import itertools
 import json
 import os
 import shutil
@@ -60,31 +61,31 @@ import torch  # noqa: E402,F401  (loaded before kokoro, which needs it)
 from kokoro import KPipeline  # noqa: E402
 
 SOCK = os.path.expanduser("~/.claude/kokoro.sock")
-VOICE = os.environ.get("KOKORO_VOICE", "bm_fable")
+VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 SPEED = float(os.environ.get("KOKORO_SPEED", "1.2"))  # the default; `/read-aloud speed` overrides it
 CONFIG = os.path.expanduser("~/.claude/read-aloud/config.json")
 
 
-def speed() -> float:
-    """The speed `/read-aloud speed` saved, read fresh for each request, else SPEED."""
+def setting(key, default):
+    """A value `/read-aloud` saved, read fresh for each request, else the default."""
     try:
         with open(CONFIG) as f:
-            value = json.load(f).get("speed", SPEED)
-        return min(2.0, max(0.5, float(value)))
-    except (OSError, ValueError, TypeError):
-        return SPEED
-SR = 24000
-WAV = os.path.join(tempfile.gettempdir(), "kokoro-speak.wav")
+            return json.load(f).get(key, default)
+    except (OSError, ValueError):
+        return default
 
-# CPU by default: on Apple silicon it's faster than MPS for a model this small, and MPS (with its
-# CPU fallbacks) audibly roughens the voice.
-DEVICE = os.environ.get("KOKORO_DEVICE", "cpu")
-pipe = KPipeline(lang_code=VOICE[0], repo_id="hexgrad/Kokoro-82M", device=DEVICE)
-list(pipe("Ready.", voice=VOICE))  # load the voice and pay the first-call cost now, not on a turn
-player = None
-lock = threading.Lock()
-generation = 0  # bumped by each request; a reading still running for an older one stops
-synth = threading.Lock()  # one synthesis at a time; an outdated one gives way at its next segment
+
+def speed() -> float:
+    try:
+        return min(2.0, max(0.5, float(setting("speed", SPEED))))
+    except (ValueError, TypeError):
+        return SPEED
+
+
+def voice() -> str:
+    """`/read-aloud voice` if it names an English Kokoro voice (a… US, b… UK), else VOICE."""
+    v = setting("voice", VOICE)
+    return v if isinstance(v, str) and len(v) > 3 and v[0] in "ab" and v[2] == "_" else VOICE
 
 
 def speak(text: str, gen: int) -> None:
@@ -95,7 +96,17 @@ def speak(text: str, gen: int) -> None:
 
 def _speak(text: str, gen: int) -> None:
     global player
-    for i, (_, _, audio) in enumerate(pipe(text, voice=VOICE, speed=speed())):
+    v = voice()
+    try:
+        chunks = pipeline(v[0])(text, voice=v, speed=speed())
+        first = next(chunks, None)
+    except Exception:  # a voice Kokoro doesn't have: fall back to the default
+        v = VOICE
+        chunks = pipeline(v[0])(text, voice=v, speed=speed())
+        first = next(chunks, None)
+    if first is None:
+        return
+    for i, (_, _, audio) in enumerate(itertools.chain([first], chunks)):
         if gen != generation:
             return
         wav = f"{WAV[:-4]}-{gen}-{i}.wav"

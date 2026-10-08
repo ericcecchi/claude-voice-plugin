@@ -85,7 +85,7 @@ class Settings(Toggle):
 
     def test_defaults(self):
         s = self.ra.settings()
-        self.assertEqual((s["updates"], s["reactions"], s["speed"]), (False, True, 1.2))
+        self.assertEqual((s["updates"], s["reactions"], s["speed"], s["voice"]), (False, True, 1.2, "af_heart"))
 
     def test_updates_and_reactions(self):
         self.assertIn("now ON", self.context("/read-aloud updates on"))
@@ -103,6 +103,14 @@ class Settings(Toggle):
         self.assertEqual(self.ra.settings()["speed"], 2.0)  # clamped
         self.assertIn("isn't a speed", self.context("/read-aloud speed fast"))
         self.assertEqual(self.ra.tts_command("hi")[2], "350") if self.ra.shutil.which("say") else None
+
+    def test_voice(self):
+        self.assertEqual(self.ra.settings()["voice"], "af_heart")
+        self.assertIn("now bf_emma", self.context("/read-aloud voice emma"))  # short name
+        self.assertIn("now am_fenrir", self.context("/read-aloud voice am_fenrir"))
+        self.assertIn("isn't a Kokoro voice", self.context("/read-aloud voice robot"))
+        self.assertEqual(self.ra.settings()["voice"], "am_fenrir")
+        self.assertIn("US female: heart", self.context("/read-aloud voices"))
 
     def test_settings_and_unknown(self):
         self.assertIn("speed 1.2x", self.context("/read-aloud settings"))

@@ -133,7 +133,18 @@ DEFAULTS = {
     "updates": False,  # mid-task updates; off unless asked for
     "reactions": True,  # the short spoken reaction when a prompt is sent
     "speed": float(os.environ.get("KOKORO_SPEED", "1.2")),
+    "voice": os.environ.get("KOKORO_VOICE", "af_heart"),  # used by the Kokoro server
 }
+# Kokoro's English voices, best-graded first in each group (VOICES.md in hexgrad/Kokoro-82M).
+VOICES = {
+    "US female": ["af_heart", "af_bella", "af_nicole", "af_aoede", "af_kore", "af_sarah", "af_nova",
+                  "af_sky", "af_alloy", "af_jessica", "af_river"],
+    "US male": ["am_fenrir", "am_michael", "am_puck", "am_echo", "am_eric", "am_liam", "am_onyx",
+                "am_santa", "am_adam"],
+    "UK female": ["bf_emma", "bf_isabella", "bf_alice", "bf_lily"],
+    "UK male": ["bm_george", "bm_fable", "bm_lewis", "bm_daniel"],
+}
+ALL_VOICES = {v for group in VOICES.values() for v in group}
 ACK_MODEL = os.environ.get("READ_ALOUD_ACK_MODEL", "haiku")  # through `claude -p`, on your Claude login
 ACK_WAIT = float(os.environ.get("READ_ALOUD_ACK_WAIT", "8"))  # seconds to wait for Haiku before falling back
 SUMMARY_MODEL = os.environ.get("READ_ALOUD_SUMMARY_MODEL", "haiku")  # writes the end-of-turn reading
@@ -321,7 +332,12 @@ SETTING_NAMES = {"updates": "updates", "update": "updates", "progress": "updates
 
 def describe(s):
     return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
-            f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x")
+            f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x; voice {s['voice']}")
+
+
+def voices_list():
+    return "Voices: " + "; ".join(f"{group}: {', '.join(v[3:] for v in names)}" for group, names in VOICES.items()) + \
+        ". Use /read-aloud voice <name>, like /read-aloud voice heart."
 
 
 def toggle(event):
@@ -329,6 +345,7 @@ def toggle(event):
       (nothing) | on | off        voice for this session
       updates|reactions [on|off]  mid-task updates / the spoken reaction, saved for every session
       speed <0.5-2.0>             speaking speed, saved for every session
+      voice <name> | voices       the Kokoro voice (heart, emma, af_bella…), saved; or list them
       settings                    what's set now
     """
     m = TOGGLE.match(event.get("prompt") or "")
@@ -357,11 +374,20 @@ def toggle(event):
         else:
             save_setting("speed", speed)
             note = f"Read-aloud speed is now {speed:g}x (saved for every session)."
+    elif args[0] == "voice" and len(args) > 1:
+        name = args[1] if args[1] in ALL_VOICES else next((v for v in ALL_VOICES if v[3:] == args[1]), None)
+        if name:
+            save_setting("voice", name)
+            note = f"Read-aloud voice is now {name} (saved for every session; used when Kokoro is running)."
+        else:
+            note = f"'{args[1]}' isn't a Kokoro voice. " + voices_list()
+    elif args[0] in ("voice", "voices"):
+        note = voices_list()
     elif args[0] in ("settings", "status"):
         note = "Read-aloud settings."
     else:
         note = (f"'{' '.join(args)}' isn't a read-aloud option. Options: on, off, updates on|off, "
-                "reactions on|off, speed <0.5-2.0>, settings.")
+                "reactions on|off, speed <0.5-2.0>, voice <name>, voices, settings.")
     now = describe(settings()).format(voice="on" if voice_on(sid) else "off")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
         f"{note} Current settings: {now}. Tell the user in one short sentence."}}))

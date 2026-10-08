@@ -42,6 +42,8 @@ These are saved for every session (in `~/.claude/read-aloud/config.json`):
 | `/read-aloud updates on\|off` | off | Mid-task updates on long turns. |
 | `/read-aloud reactions on\|off` | on | The short spoken reaction when you send a prompt. |
 | `/read-aloud speed 1.3` | `1.2` | Speaking speed, 0.5 to 2.0, for Kokoro and the system voice. |
+| `/read-aloud voice heart` | `af_heart` | The Kokoro voice, by full or short name (`heart`, `emma`, `am_fenrir`). |
+| `/read-aloud voices` | | Lists the voices. |
 | `/read-aloud settings` | | Shows what's set now. |
 
 `/read-aloud`, `/read-aloud on` and `/read-aloud off` turn the voice on or off for the current session only.
@@ -112,7 +114,7 @@ Copy the server somewhere stable (the plugin's install path changes between vers
 launchctl load ~/Library/LaunchAgents/local.kokoro-speak.plist
 ```
 
-`KOKORO_VOICE` (default `bm_fable`) and `KOKORO_DEVICE` (`cpu` by default; `mps` uses the GPU, but it's slower for this small model and roughens the voice) go in the plist's `EnvironmentVariables`. Voices differ in quality: Kokoro grades the US voices `af_heart` (A) and `af_bella` (A-) highest; the British ones, `bf_emma` (B-) and `bm_fable` (C), lower. See Kokoro's VOICES.md for the full list. The server reads `/read-aloud speed` on every request, so speed changes need no restart.
+`KOKORO_VOICE` (the default voice, `af_heart`, which `/read-aloud voice` overrides) and `KOKORO_DEVICE` (`cpu` by default; `mps` uses the GPU, but it's slower for this small model and roughens the voice) go in the plist's `EnvironmentVariables`. Voices differ in quality: Kokoro grades the US voices `af_heart` (A) and `af_bella` (A-) highest; the British ones, `bf_emma` (B-) and `bm_fable` (C), lower. See Kokoro's VOICES.md for the full list. The server reads `/read-aloud speed` and `/read-aloud voice` on every request, so changes need no restart.
 
 ## Development
 
