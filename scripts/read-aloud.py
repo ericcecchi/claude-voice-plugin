@@ -21,10 +21,10 @@ Environment:
   READ_ALOUD_DIRS          colon-separated folders; if set, speak only when cwd is inside one
   READ_ALOUD_ACK_MODEL     Claude model for the acknowledgment, via `claude -p` (default haiku);
                            empty to skip it
-  READ_ALOUD_ACK_WAIT      seconds to wait for that model before the fallback (default 4)
+  READ_ALOUD_ACK_WAIT      seconds to wait for that model before the fallback (default 8)
   READ_ALOUD_SUMMARY_MODEL Claude model for the end-of-turn reading (default haiku); empty for
                            the rule-based cut only
-  READ_ALOUD_SUMMARY_WAIT  seconds to wait for it before the rule-based cut (default 20)
+  READ_ALOUD_SUMMARY_WAIT  seconds to wait for it before the rule-based cut (default 60)
   READ_ALOUD_OLLAMA_MODEL  local Ollama model, the fallback (default gemma4:e2b); empty to skip it
   READ_ALOUD_SAY_RATE      words per minute for the system voice (default: 175 times the speed)
   READ_ALOUD_PROGRESS_GAP  seconds of quiet before a mid-task update (default 20; 0 for every one)
@@ -135,10 +135,11 @@ DEFAULTS = {
     "speed": float(os.environ.get("KOKORO_SPEED", "1.2")),
 }
 ACK_MODEL = os.environ.get("READ_ALOUD_ACK_MODEL", "haiku")  # through `claude -p`, on your Claude login
-ACK_WAIT = float(os.environ.get("READ_ALOUD_ACK_WAIT", "4"))  # seconds to wait for Haiku before falling back
+ACK_WAIT = float(os.environ.get("READ_ALOUD_ACK_WAIT", "8"))  # seconds to wait for Haiku before falling back
 SUMMARY_MODEL = os.environ.get("READ_ALOUD_SUMMARY_MODEL", "haiku")  # writes the end-of-turn reading
+EFFORT = os.environ.get("READ_ALOUD_EFFORT", "high")  # effort for every Haiku call
 SHORT_REPLY = 280  # characters of speech below which a reply is read as it is
-SUMMARY_WAIT = float(os.environ.get("READ_ALOUD_SUMMARY_WAIT", "20"))  # seconds before the rule-based fallback
+SUMMARY_WAIT = float(os.environ.get("READ_ALOUD_SUMMARY_WAIT", "60"))  # seconds before the rule-based fallback
 QUICK_MODEL = os.environ.get("READ_ALOUD_OLLAMA_MODEL", "gemma4:e2b")  # local fallback, through Ollama
 QUICK_SYSTEM = (
     "You're a friendly coworker who just read a message from a teammate and is about to start on it. "
@@ -165,6 +166,7 @@ QUICK_EXAMPLES = [  # shown as earlier turns, so the model copies the tone and n
 # Words only the examples use; a line that has one the prompt doesn't was copied, not meant.
 EXAMPLE_WORDS = {"flaky", "flakes", "locally", "clashing", "built-in", "dark", "login"}
 # A reaction that claims a result ("it's working fine") answers before any work was done.
+SELF_CORRECTS = re.compile(r"\b(?:scratch that|wait,? no|never ?mind|i mean)\b", re.I)  # thinking out loud
 CLAIMS = re.compile(r"\b(?:(?:it's|it is|seems to be|looks|is)\s+(?:all\s+)?(?:working|fine|good|fixed|done)|"
                     r"i (?:just )?(?:tested|checked|fixed|confirmed))\b", re.I)
 # A message that's only thanks or a nod needs no spoken reaction.
@@ -219,7 +221,7 @@ def claude_text(model, system, text, timeout):
     out = subprocess.run(
         ["claude", "-p", text, "--model", model, "--system-prompt", system,
          "--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands", "--tools", "",
-         "--no-session-persistence", "--effort", "low"],
+         "--no-session-persistence", "--effort", EFFORT],
         stdin=subprocess.DEVNULL,  # `claude -p` would append whatever is piped in to the prompt
         capture_output=True, text=True, timeout=timeout, env=env, cwd=tempfile.gettempdir())
     return out.stdout if out.returncode == 0 else ""
@@ -283,7 +285,7 @@ def _usable(text, prompt):
     borrowed = {w for w in re.findall(r"[a-z-]+", line.lower()) if w in EXAMPLE_WORDS} - \
         set(re.findall(r"[a-z-]+", prompt.lower()))
     claims = CLAIMS.search(re.sub(r"\b(?:whether|if)\b.*", "", line, flags=re.I))  # "see if it works" is fine
-    if line and not borrowed and not claims and ":" not in line and "->" not in line and 3 <= len(line.split()) <= 24:
+    if line and not borrowed and not claims and not SELF_CORRECTS.search(line) and ":" not in line and "->" not in line and 3 <= len(line.split()) <= 24:
         return line[0].upper() + line[1:]
     return ""
 
