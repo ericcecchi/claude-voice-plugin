@@ -11,7 +11,7 @@
       "name": "read-aloud",
       "source": "./",
       "description": "Reads Claude's replies out loud. Off by default; /read-aloud toggles it per session.",
-      "version": "1.3.2"
+      "version": "1.4.0"
     }
   ]
 }

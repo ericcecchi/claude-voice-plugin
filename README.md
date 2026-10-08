@@ -5,7 +5,7 @@ A Claude Code plugin that reads Claude's replies out loud, so you can look away 
 - **Off by default.** `/read-aloud` toggles it for the current session; `/read-aloud on` and `/read-aloud off` set it. A **Voice on / Voice off** button does the same: just above the prompt in the desktop app, in the prompt footer in the terminal (experimental, see below).
 - **Replies:** when Claude finishes, it reads the final message, minus code, tables and pleasantries. Its length follows the reply's.
 - **Acknowledgment:** a beat after you send a prompt, it reacts out loud in a sentence or two, so there's no dead air. The line comes from Claude Haiku (through `claude -p`, on your Claude login); if Haiku is slow or missing, from a local [Ollama](https://ollama.com) model; otherwise it's a canned one.
-- **Progress:** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
+- **Updates (off by default):** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
 - **Questions:** when an `AskUserQuestion` prompt opens, it gives a short heads-up.
 - **Voice:** a warm [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) server if one is running, otherwise the system voice: `say` on macOS, `spd-say` or `espeak` on Linux. New speech cuts off the old.
 
@@ -35,7 +35,18 @@ Speech is synthesized on your machine. Nothing is sent anywhere except the ackno
 
 ## Settings
 
-Set these in the `env` block of `~/.claude/settings.json`:
+These are saved for every session (in `~/.claude/read-aloud/config.json`):
+
+| Command | Default | What it does |
+|---|---|---|
+| `/read-aloud updates on\|off` | off | Mid-task updates on long turns. |
+| `/read-aloud reactions on\|off` | on | The short spoken reaction when you send a prompt. |
+| `/read-aloud speed 1.3` | `1.2` | Speaking speed, 0.5 to 2.0, for Kokoro and the system voice. |
+| `/read-aloud settings` | | Shows what's set now. |
+
+`/read-aloud`, `/read-aloud on` and `/read-aloud off` turn the voice on or off for the current session only.
+
+For finer control, set these in the `env` block of `~/.claude/settings.json`:
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -43,7 +54,7 @@ Set these in the `env` block of `~/.claude/settings.json`:
 | `READ_ALOUD_ACK_MODEL` | `haiku` | Claude model for the acknowledgment, via `claude -p`. Empty to skip it. |
 | `READ_ALOUD_ACK_WAIT` | `4` | Seconds to wait for that model before falling back. |
 | `READ_ALOUD_OLLAMA_MODEL` | `gemma4:e2b` | Local Ollama model, the fallback. Empty to skip it. |
-| `READ_ALOUD_SAY_RATE` | `210` | `say` words per minute. |
+| `READ_ALOUD_SAY_RATE` | 175 × speed | System voice words per minute, overriding the speed setting. |
 | `READ_ALOUD_PROGRESS_GAP` | `20` | Seconds of quiet before a mid-task update. `0` speaks every one. |
 
 Each utterance is logged to `~/.claude/read-aloud.log` with the hook that spoke it and the engine (`kokoro` or `say`).
@@ -98,7 +109,7 @@ Copy the server somewhere stable (the plugin's install path changes between vers
 launchctl load ~/Library/LaunchAgents/local.kokoro-speak.plist
 ```
 
-`KOKORO_VOICE` (default `bm_fable`) and `KOKORO_SPEED` (default `1.2`) go in the plist's `EnvironmentVariables`.
+`KOKORO_VOICE` (default `bm_fable`) goes in the plist's `EnvironmentVariables`. The server reads `/read-aloud speed` on every request, so speed changes need no restart.
 
 ## Development
 

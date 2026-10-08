@@ -79,6 +79,42 @@ class Toggle(Base):
         self.assertIsNone(self.state("other"))
 
 
+class Settings(Toggle):
+    def context(self, prompt):
+        return json.loads(self.run_toggle(prompt))["hookSpecificOutput"]["additionalContext"]
+
+    def test_defaults(self):
+        s = self.ra.settings()
+        self.assertEqual((s["updates"], s["reactions"], s["speed"]), (False, True, 1.2))
+
+    def test_updates_and_reactions(self):
+        self.assertIn("now ON", self.context("/read-aloud updates on"))
+        self.assertTrue(self.ra.settings()["updates"])
+        self.context("/read-aloud progress off")  # a synonym
+        self.assertFalse(self.ra.settings()["updates"])
+        self.context("/read-aloud reactions")  # no on/off flips it
+        self.assertFalse(self.ra.settings()["reactions"])
+        self.assertIsNone(self.state())  # settings leave the session's voice alone
+
+    def test_speed(self):
+        self.assertIn("1.4x", self.context("/read-aloud speed 1.4"))
+        self.assertEqual(self.ra.settings()["speed"], 1.4)
+        self.context("/read-aloud speed 9")
+        self.assertEqual(self.ra.settings()["speed"], 2.0)  # clamped
+        self.assertIn("isn't a speed", self.context("/read-aloud speed fast"))
+        self.assertEqual(self.ra.tts_command("hi")[2], "350") if self.ra.shutil.which("say") else None
+
+    def test_settings_and_unknown(self):
+        self.assertIn("speed 1.2x", self.context("/read-aloud settings"))
+        self.assertIn("isn't a read-aloud option", self.context("/read-aloud loud"))
+
+    def test_bad_config_falls_back(self):
+        os.makedirs(os.path.dirname(self.ra.CONFIG), exist_ok=True)
+        with open(self.ra.CONFIG, "w") as f:
+            f.write('{"speed": "fast", "updates": "yes"')
+        self.assertEqual(self.ra.settings(), self.ra.DEFAULTS)
+
+
 class Summarize(Base):
     def test_reads_whole_reply_minus_fluff(self):
         text = ("Fixed it. The cap is gone.\n\n- **Speed:** now 1.2x.\n\n```bash\nrm -rf /\n```\n\n"
@@ -118,6 +154,16 @@ class FinalMessage(Base):
 class Progress(Base):
     def event(self, **extra):
         return {"session_id": "s", "transcript_path": self.transcript, "hook_event_name": "PostToolUse", **extra}
+
+    def setUp(self):
+        super().setUp()
+        self.ra.save_setting("updates", True)
+
+    def test_off_by_default(self):
+        self.ra.save_setting("updates", False)
+        self.write(user("go"), assistant("1", "Found the files."))
+        self.ra.progress(self.event())
+        self.assertEqual(self.said, [])
 
     def test_speaks_new_updates_once_after_quiet(self):
         self.write(user("old"), assistant("x", "Old turn."), user("go"), assistant("1", "Found the files."))
@@ -159,6 +205,19 @@ class QuickReply(Base):
         self.ra._ask_claude = lambda p: "Annoying when CI breaks, I'll dig in."
         self.ra._ask_ollama = lambda p: "Ollama line here, okay."
         self.assertTrue(self.ra.quick_reply("fix the CI").endswith("I'll dig in."))
+
+    def test_reactions_off(self):
+        self.ra.save_setting("reactions", False)
+        os.makedirs(self.ra.ON_DIR, exist_ok=True)
+        with open(os.path.join(self.ra.ON_DIR, "s"), "w") as f:
+            f.write("on")
+        self.ra.quick_reply = lambda p: self.fail("asked for a reaction while reactions are off")
+        event = {"session_id": "s", "hook_event_name": "UserPromptSubmit", "prompt": "fix the CI",
+                 "transcript_path": self.transcript, "cwd": self.home}
+        self.write(user("fix the CI"))
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(event))), mock.patch("sys.argv", ["x"]):
+            self.ra.main()
+        self.assertEqual(self.said, [])
 
     def test_no_ack_for_thanks_or_commands(self):
         for prompt in ("thanks!", "ok", "sounds good"):

@@ -2,13 +2,15 @@
 """Read-aloud hook: speak Claude's replies out loud.
 
 Off by default; `/read-aloud`, `/read-aloud on`, `/read-aloud off` flip it for the current
-session. Never speaks for scheduled tasks or subagents (Stop fires for the main thread only).
+session. `/read-aloud updates|reactions on|off`, `/read-aloud speed <0.5-2.0>` and
+`/read-aloud settings` change or show the settings kept for every session, in
+~/.claude/read-aloud/config.json. Never speaks for scheduled tasks or subagents.
 
   Stop               the turn's final message, minus code, tables and pleasantries
-  UserPromptSubmit   a short spoken reaction, so there's no dead air while Claude thinks
+  UserPromptSubmit   a short spoken reaction, so there's no dead air while Claude thinks (reactions)
   PreToolUse         a heads-up when an AskUserQuestion prompt opens (the question isn't read)
   PostToolUse        on long tasks, what Claude last wrote between tool calls, once it's been
-                     quiet READ_ALOUD_PROGRESS_GAP seconds (default 20)
+                     quiet READ_ALOUD_PROGRESS_GAP seconds (default 20); off unless `updates on`
 
 Voice: a warm Kokoro server (kokoro-speak-server.py) on ~/.claude/kokoro.sock if one is running,
 otherwise the system's speech command: `say` on macOS, `spd-say` or `espeak` on Linux. A new
@@ -20,7 +22,7 @@ Environment:
                            empty to skip it
   READ_ALOUD_ACK_WAIT      seconds to wait for that model before the fallback (default 4)
   READ_ALOUD_OLLAMA_MODEL  local Ollama model, the fallback (default gemma4:e2b); empty to skip it
-  READ_ALOUD_SAY_RATE      words per minute for the system voice (default 210)
+  READ_ALOUD_SAY_RATE      words per minute for the system voice (default: 175 times the speed)
   READ_ALOUD_PROGRESS_GAP  seconds of quiet before a mid-task update (default 20; 0 for every one)
 Each utterance is logged to ~/.claude/read-aloud.log (hook, engine, text).
 Global off switch: touch ~/.claude/read-aloud.off
@@ -121,7 +123,13 @@ ON_DIR = os.path.expanduser("~/.claude/read-aloud/on")  # one file per session: 
 # `/read-aloud` or the namespaced `/read-aloud:read-aloud`, typed or expanded into <command-name> tags.
 TOGGLE = re.compile(r"^\s*(?:<command-(?:message|name)>[^<]*</command-(?:message|name)>\s*)*?"
                     r"(?:<command-name>)?/(?:read-aloud:)?read-aloud(?![\w:-])\s*(?:</command-name>)?\s*"
-                    r"(?:<command-args>)?\s*(on|off)?", re.I)
+                    r"(?:<command-args>)?([^<]*)", re.I)
+CONFIG = os.path.expanduser("~/.claude/read-aloud/config.json")  # settings kept across sessions
+DEFAULTS = {
+    "updates": False,  # mid-task updates; off unless asked for
+    "reactions": True,  # the short spoken reaction when a prompt is sent
+    "speed": float(os.environ.get("KOKORO_SPEED", "1.2")),
+}
 ACK_MODEL = os.environ.get("READ_ALOUD_ACK_MODEL", "haiku")  # through `claude -p`, on your Claude login
 ACK_WAIT = float(os.environ.get("READ_ALOUD_ACK_WAIT", "4"))  # seconds to wait for Haiku before falling back
 QUICK_MODEL = os.environ.get("READ_ALOUD_OLLAMA_MODEL", "gemma4:e2b")  # local fallback, through Ollama
@@ -244,19 +252,73 @@ def voice_on(session_id):
         return False
 
 
+def settings():
+    """DEFAULTS, overridden by whatever `/read-aloud <setting>` has saved."""
+    try:
+        saved = json.loads(_read(CONFIG))
+    except (OSError, ValueError):
+        saved = {}
+    return {k: saved.get(k, v) if isinstance(saved.get(k, v), type(v)) else v for k, v in DEFAULTS.items()}
+
+
+def save_setting(key, value):
+    current = settings()
+    current[key] = value
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    with open(CONFIG, "w") as f:
+        json.dump(current, f, indent=2)
+
+
+SETTING_NAMES = {"updates": "updates", "update": "updates", "progress": "updates",
+                 "reactions": "reactions", "reaction": "reactions", "acks": "reactions", "ack": "reactions"}
+
+
+def describe(s):
+    return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
+            f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x")
+
+
 def toggle(event):
-    """Sync UserPromptSubmit hook: `/read-aloud`, `/read-aloud on`, `/read-aloud off` flip read-aloud for this session."""
+    """Sync UserPromptSubmit hook for `/read-aloud`:
+      (nothing) | on | off        voice for this session
+      updates|reactions [on|off]  mid-task updates / the spoken reaction, saved for every session
+      speed <0.5-2.0>             speaking speed, saved for every session
+      settings                    what's set now
+    """
     m = TOGGLE.match(event.get("prompt") or "")
     sid = event.get("session_id") or ""
     if not m or not sid:
         return
-    want = {"on": True, "off": False}.get((m.group(1) or "").lower(), not voice_on(sid))
-    os.makedirs(ON_DIR, exist_ok=True)
-    with open(os.path.join(ON_DIR, sid), "w") as f:
-        f.write("on" if want else "off")
-    state = "ON" if want else "OFF"
+    args = m.group(1).lower().split()
+    flag = {"on": True, "off": False}
+    if not args or args[0] in flag:
+        want = flag[args[0]] if args else not voice_on(sid)
+        os.makedirs(ON_DIR, exist_ok=True)
+        with open(os.path.join(ON_DIR, sid), "w") as f:
+            f.write("on" if want else "off")
+        note = f"Read-aloud voice is now {'ON' if want else 'OFF'} for this session."
+    elif args[0] in SETTING_NAMES:
+        key = SETTING_NAMES[args[0]]
+        want = flag.get(args[1], not settings()[key]) if len(args) > 1 else not settings()[key]
+        save_setting(key, want)
+        what = "Mid-task updates" if key == "updates" else "Spoken reactions to new prompts"
+        note = f"{what} are now {'ON' if want else 'OFF'} (saved for every session)."
+    elif args[0] == "speed" and len(args) > 1:
+        try:
+            speed = round(min(2.0, max(0.5, float(args[1].rstrip("x")))), 2)
+        except ValueError:
+            note = f"'{args[1]}' isn't a speed; use a number from 0.5 to 2.0, like /read-aloud speed 1.3."
+        else:
+            save_setting("speed", speed)
+            note = f"Read-aloud speed is now {speed:g}x (saved for every session)."
+    elif args[0] in ("settings", "status"):
+        note = "Read-aloud settings."
+    else:
+        note = (f"'{' '.join(args)}' isn't a read-aloud option. Options: on, off, updates on|off, "
+                "reactions on|off, speed <0.5-2.0>, settings.")
+    now = describe(settings()).format(voice="on" if voice_on(sid) else "off")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
-        f"Read-aloud voice is now {state} for this session. Confirm that in one short sentence."}}))
+        f"{note} Current settings: {now}. Tell the user in one short sentence."}}))
 
 
 def pick(lines, name):
@@ -402,7 +464,7 @@ def speak(s, kind="reply"):
 
 def tts_command(s):
     """The system's own speech command: `say` on macOS, `spd-say` or `espeak` on Linux."""
-    wpm = int(os.environ.get("READ_ALOUD_SAY_RATE", "210"))  # 1.2x the usual 175 wpm
+    wpm = int(os.environ.get("READ_ALOUD_SAY_RATE") or round(175 * settings()["speed"]))  # 175 wpm is 1x
     if shutil.which("say"):
         return ["say", "-r", str(wpm), s]
     if shutil.which("spd-say"):  # rate is -100..100 around its default; -w waits so the pid lives
@@ -440,8 +502,8 @@ def turn_text_blocks(transcript_path):
 def progress(event):
     """Mid-turn: speak the newest thing Claude wrote between tool calls, if it's new and the
     speaker has been quiet a while, so a long task isn't silent and a short one isn't chatty."""
-    if event.get("agent_id"):
-        return  # a subagent's tool call; its text isn't the main thread's
+    if event.get("agent_id") or not settings()["updates"]:
+        return  # a subagent's tool call (its text isn't the main thread's), or updates are off
     blocks = turn_text_blocks(event.get("transcript_path", ""))
     if not blocks:
         return
@@ -497,7 +559,8 @@ def main():
         return progress(event)
     if hook == "UserPromptSubmit":  # acknowledge right away, before Claude starts thinking
         prompt = event.get("prompt") or ""
-        if not prompt.lstrip().startswith(("/", "<command", "<bash-", "!")) and not NO_ACK.match(prompt):
+        if settings()["reactions"] and not prompt.lstrip().startswith(("/", "<command", "<bash-", "!")) \
+                and not NO_ACK.match(prompt):
             line = quick_reply(prompt)
             # A person takes a beat to read before reacting: about a second, longer for longer
             # prompts, never the same twice. Kokoro's own synthesis adds a little on top.

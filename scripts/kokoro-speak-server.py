@@ -11,9 +11,10 @@ README for a launchd job that keeps it running.
 
 Environment:
   KOKORO_VOICE   voice id (default bm_fable); the first letter picks the language (a US, b UK)
-  KOKORO_SPEED   speaking speed (default 1.2)
+  KOKORO_SPEED   speaking speed (default 1.2); `/read-aloud speed` overrides it
   ESPEAK_PREFIX  where espeak-ng is installed (default: `brew --prefix espeak-ng`)
 """
+import json
 import os
 import shutil
 import socket
@@ -59,7 +60,18 @@ from kokoro import KPipeline  # noqa: E402
 
 SOCK = os.path.expanduser("~/.claude/kokoro.sock")
 VOICE = os.environ.get("KOKORO_VOICE", "bm_fable")
-SPEED = float(os.environ.get("KOKORO_SPEED", "1.2"))
+SPEED = float(os.environ.get("KOKORO_SPEED", "1.2"))  # the default; `/read-aloud speed` overrides it
+CONFIG = os.path.expanduser("~/.claude/read-aloud/config.json")
+
+
+def speed() -> float:
+    """The speed `/read-aloud speed` saved, read fresh for each request, else SPEED."""
+    try:
+        with open(CONFIG) as f:
+            value = json.load(f).get("speed", SPEED)
+        return min(2.0, max(0.5, float(value)))
+    except (OSError, ValueError, TypeError):
+        return SPEED
 SR = 24000
 WAV = os.path.join(tempfile.gettempdir(), "kokoro-speak.wav")
 
@@ -80,7 +92,7 @@ def speak(text: str, gen: int) -> None:
 
 def _speak(text: str, gen: int) -> None:
     global player
-    for i, (_, _, audio) in enumerate(pipe(text, voice=VOICE, speed=SPEED)):
+    for i, (_, _, audio) in enumerate(pipe(text, voice=VOICE, speed=speed())):
         if gen != generation:
             return
         wav = f"{WAV[:-4]}-{gen}-{i}.wav"
