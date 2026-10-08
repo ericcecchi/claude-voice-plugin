@@ -12,6 +12,7 @@ README for a launchd job that keeps it running.
 Environment:
   KOKORO_VOICE   voice id (default bm_fable); the first letter picks the language (a US, b UK)
   KOKORO_SPEED   speaking speed (default 1.2); `/read-aloud speed` overrides it
+  KOKORO_DEVICE  cpu (default) or mps; cpu sounds cleaner and is faster here
   ESPEAK_PREFIX  where espeak-ng is installed (default: `brew --prefix espeak-ng`)
 """
 import json
@@ -55,7 +56,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
-import torch  # noqa: E402
+import torch  # noqa: E402,F401  (loaded before kokoro, which needs it)
 from kokoro import KPipeline  # noqa: E402
 
 SOCK = os.path.expanduser("~/.claude/kokoro.sock")
@@ -75,8 +76,10 @@ def speed() -> float:
 SR = 24000
 WAV = os.path.join(tempfile.gettempdir(), "kokoro-speak.wav")
 
-pipe = KPipeline(lang_code=VOICE[0], repo_id="hexgrad/Kokoro-82M",
-                 device="mps" if torch.backends.mps.is_available() else "cpu")
+# CPU by default: on Apple silicon it's faster than MPS for a model this small, and MPS (with its
+# CPU fallbacks) audibly roughens the voice.
+DEVICE = os.environ.get("KOKORO_DEVICE", "cpu")
+pipe = KPipeline(lang_code=VOICE[0], repo_id="hexgrad/Kokoro-82M", device=DEVICE)
 list(pipe("Ready.", voice=VOICE))  # load the voice and pay the first-call cost now, not on a turn
 player = None
 lock = threading.Lock()

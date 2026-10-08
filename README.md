@@ -112,7 +112,7 @@ Copy the server somewhere stable (the plugin's install path changes between vers
 launchctl load ~/Library/LaunchAgents/local.kokoro-speak.plist
 ```
 
-`KOKORO_VOICE` (default `bm_fable`) goes in the plist's `EnvironmentVariables`. The server reads `/read-aloud speed` on every request, so speed changes need no restart.
+`KOKORO_VOICE` (default `bm_fable`) and `KOKORO_DEVICE` (`cpu` by default; `mps` uses the GPU, but it's slower for this small model and roughens the voice) go in the plist's `EnvironmentVariables`. Voices differ in quality: Kokoro grades the US voices `af_heart` (A) and `af_bella` (A-) highest; the British ones, `bf_emma` (B-) and `bm_fable` (C), lower. See Kokoro's VOICES.md for the full list. The server reads `/read-aloud speed` on every request, so speed changes need no restart.
 
 ## Development
 

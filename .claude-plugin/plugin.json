@@ -1,6 +1,6 @@
 {
   "name": "read-aloud",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Reads Claude's replies out loud. Off by default; /read-aloud toggles it per session.",
   "author": {
     "name": "Eric Cecchi"
