@@ -137,6 +137,27 @@ class Summarize(Base):
         self.assertGreater(len(self.ra.summarize(text)), 5000)
 
 
+class SpokenSummary(Base):
+    def test_short_reply_read_as_is_without_a_model_call(self):
+        self.ra.claude_text = lambda *a: self.fail("called the model for a short reply")
+        self.assertEqual(self.ra.spoken_summary("Voice is off for this session."), "Voice is off for this session.")
+
+    def test_long_reply_uses_the_model(self):
+        calls = []
+        def fake(model, system, text, timeout):
+            calls.append(text)
+            return "It **works** now.\nWant me to push?"
+        self.ra.claude_text = fake
+        long = "Done. " + " ".join(f"Detail number {i} about the change." for i in range(40))
+        self.assertEqual(self.ra.spoken_summary(long), "It works now. Want me to push?")
+        self.assertIn("<reply>", calls[0])
+
+    def test_falls_back_to_rules_when_the_model_fails(self):
+        self.ra.claude_text = lambda *a: ""
+        long = "Done. " + " ".join(f"Detail number {i} about the change." for i in range(40))
+        self.assertEqual(self.ra.spoken_summary(long), self.ra.summarize(long))
+
+
 class FinalMessage(Base):
     def test_reads_only_the_last_block(self):
         self.write(user("go"), assistant("1", "Looking now."), assistant("2", "All done. It works."))

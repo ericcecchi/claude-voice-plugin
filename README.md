@@ -3,7 +3,7 @@
 A Claude Code plugin that reads Claude's replies out loud, so you can look away from the screen while it works.
 
 - **Off by default.** `/read-aloud` toggles it for the current session; `/read-aloud on` and `/read-aloud off` set it. A **Voice on / Voice off** button does the same: just above the prompt in the desktop app, in the prompt footer in the terminal (experimental, see below).
-- **Replies:** when Claude finishes, it reads the final message, minus code, tables and pleasantries. Its length follows the reply's.
+- **Replies:** when Claude finishes, Claude Haiku sums up the final message for the ear: the outcome, anything you need to do or decide, and any question for you, at a length that fits. Short replies are read as they are. If Haiku is slow or missing, it reads the message minus code, tables and pleasantries.
 - **Acknowledgment:** a beat after you send a prompt, it reacts out loud in a sentence or two, so there's no dead air. The line comes from Claude Haiku (through `claude -p`, on your Claude login); if Haiku is slow or missing, from a local [Ollama](https://ollama.com) model; otherwise it's a canned one.
 - **Updates (off by default):** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
 - **Questions:** when an `AskUserQuestion` prompt opens, it gives a short heads-up.
@@ -31,7 +31,7 @@ A local checkout works too: `/plugin marketplace add /path/to/claude-voice-plugi
 
 ## Privacy and cost
 
-Speech is synthesized on your machine. Nothing is sent anywhere except the acknowledgment request: your prompt (its first 1,500 characters) goes to Claude Haiku through your own `claude` login, one small call per prompt. Set `READ_ALOUD_ACK_MODEL` to empty to keep that local too (Ollama, or canned lines).
+Speech is synthesized on your machine. Two things go to Claude Haiku through your own `claude` login: your prompt (its first 1,500 characters) for the spoken reaction, and Claude's final message (when it's longer than a couple of sentences) for the summary. That's up to two small calls per turn. Set `READ_ALOUD_ACK_MODEL` and `READ_ALOUD_SUMMARY_MODEL` to empty to keep everything local.
 
 ## Settings
 
@@ -53,6 +53,8 @@ For finer control, set these in the `env` block of `~/.claude/settings.json`:
 | `READ_ALOUD_DIRS` | unset | Colon-separated folders. If set, speak only when the session's cwd is inside one. |
 | `READ_ALOUD_ACK_MODEL` | `haiku` | Claude model for the acknowledgment, via `claude -p`. Empty to skip it. |
 | `READ_ALOUD_ACK_WAIT` | `4` | Seconds to wait for that model before falling back. |
+| `READ_ALOUD_SUMMARY_MODEL` | `haiku` | Claude model that sums up the final message. Empty for the rule-based reading only. |
+| `READ_ALOUD_SUMMARY_WAIT` | `20` | Seconds to wait for it before the rule-based reading. |
 | `READ_ALOUD_OLLAMA_MODEL` | `gemma4:e2b` | Local Ollama model, the fallback. Empty to skip it. |
 | `READ_ALOUD_SAY_RATE` | 175 × speed | System voice words per minute, overriding the speed setting. |
 | `READ_ALOUD_PROGRESS_GAP` | `20` | Seconds of quiet before a mid-task update. `0` speaks every one. |
