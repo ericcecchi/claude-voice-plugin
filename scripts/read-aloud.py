@@ -137,7 +137,7 @@ DEFAULTS = {
     "engine": "kokoro",  # kokoro (Kokoro when its server runs, else the system voice), elevenlabs, system
     "elevenlabs_voice": "JBFqnCBsd6RMkjVDRZzb",  # ElevenLabs' default "George"
     "elevenlabs_voice_name": "George",
-    "elevenlabs_model": os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2"),
+    "elevenlabs_model": os.environ.get("ELEVENLABS_MODEL", "eleven_v4"),
 }
 ENGINES = ("kokoro", "elevenlabs", "system")
 ELEVENLABS = "https://api.elevenlabs.io/v1"
@@ -340,7 +340,7 @@ def describe(s):
     voice = s["elevenlabs_voice_name"] if s["engine"] == "elevenlabs" else s["voice"]
     return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
             f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x; engine {s['engine']}; "
-            f"voice {voice}")
+            f"voice {voice}" + (f"; model {s['elevenlabs_model']}" if s["engine"] == "elevenlabs" else ""))
 
 
 def voices_list():
@@ -354,6 +354,7 @@ def toggle(event):
       updates|reactions [on|off]  mid-task updates / the spoken reaction, saved for every session
       speed <0.5-2.0>             speaking speed, saved for every session
       engine kokoro|elevenlabs|system   what speaks, saved for every session
+      model <id>                  the ElevenLabs model (eleven_v4, eleven_v4_turbo…), saved
       voice <name> | voices       the voice for that engine (Kokoro: heart, emma…; ElevenLabs: a voice
                                   name or id from your account), saved; or list them
       settings                    what's set now
@@ -385,6 +386,13 @@ def toggle(event):
         else:
             save_setting("speed", speed)
             note = f"Read-aloud speed is now {speed:g}x (saved for every session)."
+    elif args[0] == "model" and len(args) > 1:
+        if re.fullmatch(r"[a-z0-9_]+", args[1]):
+            save_setting("elevenlabs_model", args[1])
+            note = (f"ElevenLabs model is now {args[1]} (saved for every session). If ElevenLabs rejects it, "
+                    "lines fall back to Kokoro and the log says why.")
+        else:
+            note = f"'{args[1]}' doesn't look like an ElevenLabs model id, such as eleven_v4 or eleven_v4_turbo."
     elif args[0] == "engine" and len(args) > 1:
         if args[1] in ENGINES:
             save_setting("engine", args[1])
@@ -423,7 +431,7 @@ def toggle(event):
     else:
         note = (f"'{' '.join(args)}' isn't a read-aloud option. Options: on, off, updates on|off, "
                 "reactions on|off, speed <0.5-2.0>, engine kokoro|elevenlabs|system, voice <name>, voices, "
-                "settings.")
+                "model <id>, settings.")
     now = describe(settings()).format(voice="on" if voice_on(sid) else "off")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
         f"{note} Current settings: {now}. Tell the user in one short sentence."}}))

@@ -168,6 +168,12 @@ class ElevenLabs(Toggle):
         self.assertEqual((body["text"], body["voice_settings"]["speed"]), ("Hello there.", 1.2))
         self.assertEqual(self.played[-1][0], "afplay")
 
+    def test_model(self):
+        self.assertEqual(self.ra.settings()["elevenlabs_model"], "eleven_v4")
+        self.assertIn("now eleven_v4_turbo", self.context("/read-aloud model eleven_v4_turbo"))
+        self.assertIn("doesn't look like", self.context("/read-aloud model v4!"))
+        self.assertEqual(self.ra.settings()["elevenlabs_model"], "eleven_v4_turbo")
+
     def test_voice_id_is_taken_as_is(self):
         vid = "pNInz6obpgDQGcFmaJgB"  # not in the account's list
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
