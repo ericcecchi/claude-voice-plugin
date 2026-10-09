@@ -88,6 +88,27 @@ def voice() -> str:
     return v if isinstance(v, str) and len(v) > 3 and v[0] in "ab" and v[2] == "_" else VOICE
 
 
+SR = 24000
+WAV = os.path.join(tempfile.gettempdir(), "kokoro-speak.wav")
+# CPU by default: on Apple silicon it's faster than MPS for a model this small, and MPS (with its
+# CPU fallbacks) audibly roughens the voice.
+DEVICE = os.environ.get("KOKORO_DEVICE", "cpu")
+pipes = {}  # one pipeline per language: "a" US English, "b" UK English
+
+
+def pipeline(lang: str):
+    if lang not in pipes:
+        pipes[lang] = KPipeline(lang_code=lang, repo_id="hexgrad/Kokoro-82M", device=DEVICE)
+    return pipes[lang]
+
+
+list(pipeline(voice()[0])("Ready.", voice=voice()))  # pay the first-call cost now, not on a turn
+player = None
+lock = threading.Lock()
+generation = 0  # bumped by each request; a reading still running for an older one stops
+synth = threading.Lock()  # one synthesis at a time; an outdated one gives way at its next segment
+
+
 def speak(text: str, gen: int) -> None:
     """Synthesize and play segment by segment, so a long reply starts at once and is never cut short."""
     with synth:
