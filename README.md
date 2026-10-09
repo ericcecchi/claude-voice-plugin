@@ -74,7 +74,7 @@ State lives in `~/.claude/read-aloud/on/<session id>` (`on` or `off`), so other 
 1. Get an API key from your ElevenLabs account, then make it available to Claude Code in one of two ways (never paste it into a chat):
    - add `"ELEVENLABS_API_KEY": "..."` to the `env` block of `~/.claude/settings.json`, or
    - store it in the macOS Keychain: `security add-generic-password -s elevenlabs -a "$USER" -w` (it prompts for the key).
-2. Run `/read-aloud engine elevenlabs`, then `/read-aloud voices` and `/read-aloud voice <name>` to pick a voice.
+2. Run `/read-aloud engine elevenlabs`, then `/read-aloud voices` and `/read-aloud voice <name>` to pick a voice. A restricted key needs the Text to Speech permission to speak, and Voices (read) to list voices or pick one by name; without it, pick one by its voice id.
 
 It uses `eleven_multilingual_v2` (set `ELEVENLABS_MODEL` to change it) and your speed setting, limited to ElevenLabs' 0.7–1.2 range. If a request fails, that line falls back to Kokoro or the system voice. ElevenLabs bills by character, so long replies cost more; the Haiku summary keeps them short.
 

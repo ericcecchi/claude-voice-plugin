@@ -31,7 +31,7 @@ Environment:
 Each utterance is logged to ~/.claude/read-aloud.log (hook, engine, text).
 Global off switch: touch ~/.claude/read-aloud.off
 """
-import json, os, random, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, urllib.request
+import json, os, random, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 
 DIRS = [os.path.normpath(os.path.expanduser(d)) + "/"
         for d in os.environ.get("READ_ALOUD_DIRS", "").split(":") if d.strip()]
@@ -555,15 +555,24 @@ def elevenlabs_request(path, body=None, timeout=30):
         return r.read()
 
 
+VOICES_ERROR = {"why": ""}  # why the last voice listing failed, for the message
+
+
 def elevenlabs_voices():
     """[(voice_id, name)] in the account, or [] if there's no key or the call fails."""
     if not elevenlabs_key():
+        VOICES_ERROR["why"] = "no API key"
         return []
     try:
         data = json.loads(elevenlabs_request("/voices", timeout=4))
         return [(v["voice_id"], v["name"]) for v in data.get("voices", [])]
-    except Exception:
-        return []
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        VOICES_ERROR["why"] = ("the API key lacks the Voices (read) permission; add it to the key in "
+                               "ElevenLabs" if "voices_read" in detail else f"HTTP {e.code}")
+    except Exception as e:
+        VOICES_ERROR["why"] = type(e).__name__
+    return []
 
 
 def elevenlabs_find_voice(wanted):
@@ -581,8 +590,8 @@ def elevenlabs_find_voice(wanted):
 def elevenlabs_voices_list():
     voices = elevenlabs_voices()
     if not voices:
-        return ("Couldn't list ElevenLabs voices (no API key, or the request failed). You can still set one "
-                "by its 20-character voice id.")
+        return (f"Couldn't list ElevenLabs voices ({VOICES_ERROR['why']}). You can still set one by its "
+                "20-character voice id, from the voice's page in ElevenLabs.")
     return "ElevenLabs voices: " + ", ".join(name for _, name in voices[:40]) + \
         ". Use /read-aloud voice <name>."
 
