@@ -7,7 +7,7 @@ A Claude Code plugin that reads Claude's replies out loud, so you can look away 
 - **Acknowledgment:** a beat after you send a prompt, it reacts out loud in a sentence or two, so there's no dead air. The line comes from Claude Haiku (through `claude -p`, on your Claude login); if Haiku is slow or missing, from a local [Ollama](https://ollama.com) model; otherwise it's a canned one.
 - **Updates (off by default):** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
 - **Questions:** when an `AskUserQuestion` prompt opens, it gives a short heads-up.
-- **Voice:** a warm [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) server if one is running, otherwise the system voice: `say` on macOS, `spd-say` or `espeak` on Linux. New speech cuts off the old.
+- **Voice:** a warm [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) server if one is running, otherwise the system voice: `say` on macOS, `spd-say` or `espeak` on Linux. Or [ElevenLabs](https://elevenlabs.io), with your own API key. New speech cuts off the old.
 
 Scheduled tasks and subagents are never read aloud.
 
@@ -31,7 +31,7 @@ A local checkout works too: `/plugin marketplace add /path/to/claude-voice-plugi
 
 ## Privacy and cost
 
-Speech is synthesized on your machine. Two things go to Claude Haiku through your own `claude` login: your prompt (its first 1,500 characters) for the spoken reaction, and Claude's final message (when it's longer than a couple of sentences) for the summary. That's up to two small calls per turn. Set `READ_ALOUD_ACK_MODEL` and `READ_ALOUD_SUMMARY_MODEL` to empty to keep everything local.
+Speech is synthesized on your machine. Two things go to Claude Haiku through your own `claude` login: your prompt (its first 1,500 characters) for the spoken reaction, and Claude's final message (when it's longer than a couple of sentences) for the summary. That's up to two small calls per turn. Set `READ_ALOUD_ACK_MODEL` and `READ_ALOUD_SUMMARY_MODEL` to empty to keep everything local. With the ElevenLabs engine, every spoken line also goes to ElevenLabs.
 
 ## Settings
 
@@ -42,8 +42,9 @@ These are saved for every session (in `~/.claude/read-aloud/config.json`):
 | `/read-aloud updates on\|off` | off | Mid-task updates on long turns. |
 | `/read-aloud reactions on\|off` | on | The short spoken reaction when you send a prompt. |
 | `/read-aloud speed 1.3` | `1.2` | Speaking speed, 0.5 to 2.0, for Kokoro and the system voice. |
-| `/read-aloud voice heart` | `af_heart` | The Kokoro voice, by full or short name (`heart`, `emma`, `am_fenrir`). |
-| `/read-aloud voices` | | Lists the voices. |
+| `/read-aloud engine elevenlabs` | `kokoro` | What speaks: `kokoro` (Kokoro when its server runs, else the system voice), `elevenlabs`, or `system`. |
+| `/read-aloud voice heart` | `af_heart` / George | The voice for the current engine: a Kokoro name (`heart`, `emma`, `am_fenrir`), or an ElevenLabs voice name or id from your account. |
+| `/read-aloud voices` | | Lists the current engine's voices. |
 | `/read-aloud settings` | | Shows what's set now. |
 
 `/read-aloud`, `/read-aloud on` and `/read-aloud off` turn the voice on or off for the current session only.
@@ -67,6 +68,15 @@ Each utterance is logged to `~/.claude/read-aloud.log` with the hook that spoke 
 `touch ~/.claude/read-aloud.off` silences it everywhere; delete the file to undo.
 
 State lives in `~/.claude/read-aloud/on/<session id>` (`on` or `off`), so other tools (for example a status-line toggle) can read or flip it.
+
+## ElevenLabs
+
+1. Get an API key from your ElevenLabs account, then make it available to Claude Code in one of two ways (never paste it into a chat):
+   - add `"ELEVENLABS_API_KEY": "..."` to the `env` block of `~/.claude/settings.json`, or
+   - store it in the macOS Keychain: `security add-generic-password -s elevenlabs -a "$USER" -w` (it prompts for the key).
+2. Run `/read-aloud engine elevenlabs`, then `/read-aloud voices` and `/read-aloud voice <name>` to pick a voice.
+
+It uses `eleven_multilingual_v2` (set `ELEVENLABS_MODEL` to change it) and your speed setting, limited to ElevenLabs' 0.7–1.2 range. If a request fails, that line falls back to Kokoro or the system voice. ElevenLabs bills by character, so long replies cost more; the Haiku summary keeps them short.
 
 ## The voice button (experimental)
 

@@ -38,6 +38,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.ra = load(self.home)
+        self.real_speak = self.ra.speak
         self.said = []
 
         def fake_speak(s, kind="reply"):
@@ -121,6 +122,69 @@ class Settings(Toggle):
         with open(self.ra.CONFIG, "w") as f:
             f.write('{"speed": "fast", "updates": "yes"')
         self.assertEqual(self.ra.settings(), self.ra.DEFAULTS)
+
+
+class ElevenLabs(Toggle):
+    VOICES = {"voices": [{"voice_id": "JBFqnCBsd6RMkjVDRZzb", "name": "George"},
+                         {"voice_id": "EXAVITQu4vr4xnSDxMaL", "name": "Sarah - Mature, Reassuring"}]}
+
+    def setUp(self):
+        super().setUp()
+        self.requests = []
+
+        def fake_request(path, body=None, timeout=30):
+            self.requests.append((path, body))
+            return json.dumps(self.VOICES).encode() if path == "/voices" else b"ID3fake-mp3"
+        self.ra.elevenlabs_request = fake_request
+        self.played = []
+        fake_popen = lambda argv, **kw: (self.played.append(argv), mock.Mock(pid=4242))[1]
+        self.patches = [mock.patch.object(self.ra.subprocess, "Popen", fake_popen),
+                        mock.patch.object(self.ra, "kokoro_send", lambda t: None)]
+        for p in self.patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+
+    def context(self, prompt):
+        return json.loads(self.run_toggle(prompt))["hookSpecificOutput"]["additionalContext"]
+
+    def test_engine_without_a_key_warns_and_falls_back(self):
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: ""):
+            note = self.context("/read-aloud engine elevenlabs")
+            self.assertIn("No ElevenLabs API key", note)
+            self.assertIn("Never paste", note)
+            self.real_speak("Hello there.")
+        self.assertEqual(self.ra.settings()["engine"], "elevenlabs")
+        self.assertNotIn("/text-to-speech", str(self.requests))
+
+    def test_speaks_with_the_chosen_voice_and_clamped_speed(self):
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"), \
+                mock.patch.object(self.ra.shutil, "which", lambda n: "/usr/bin/" + n):
+            self.context("/read-aloud engine elevenlabs")
+            self.assertIn("now Sarah", self.context("/read-aloud voice sarah"))  # first word of the name
+            self.context("/read-aloud speed 1.6")
+            self.real_speak("Hello there.")
+        path, body = self.requests[-1]
+        self.assertTrue(path.startswith("/text-to-speech/EXAVITQu4vr4xnSDxMaL?"))
+        self.assertEqual((body["text"], body["voice_settings"]["speed"]), ("Hello there.", 1.2))
+        self.assertEqual(self.played[-1][0], "afplay")
+
+    def test_unknown_voice_lists_the_account(self):
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
+            self.context("/read-aloud engine elevenlabs")
+            note = self.context("/read-aloud voice nobody")
+        self.assertIn("Couldn't find", note)
+        self.assertIn("George", note)
+
+    def test_failure_falls_back_to_kokoro(self):
+        def boom(*a, **k):
+            raise OSError("network down")
+        sent = []
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"), \
+                mock.patch.object(self.ra, "elevenlabs_request", boom), \
+                mock.patch.object(self.ra, "kokoro_send", lambda t: sent.append(t)):
+            self.context("/read-aloud engine elevenlabs")
+            self.real_speak("Hello there.")
+        self.assertEqual(sent, ["\x00stop", "Hello there."])
 
 
 class Summarize(Base):

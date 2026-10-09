@@ -3,7 +3,7 @@
 
 Loads Kokoro-82M once and keeps it in memory. It listens on a Unix socket (~/.claude/kokoro.sock),
 takes UTF-8 text, synthesizes it, and plays it with `afplay`, sentence by sentence, so long text
-starts at once. A new request cuts off the one still playing.
+starts at once. A new request cuts off the one still playing; the text "\\x00stop" only cuts it off.
 When this server isn't running, the hook falls back to macOS `say`.
 
 Needs a Python venv with `kokoro soundfile numpy torch` and `brew install espeak-ng`. See the
@@ -151,15 +151,20 @@ def _cleanup(proc: subprocess.Popen, wav: str) -> None:
         pass
 
 
-def start(text: str) -> None:
-    """Cut off whatever is playing and read text instead."""
+def stop() -> int:
+    """Cut off whatever is playing; returns the new generation."""
     global generation, player
     with lock:
         generation += 1
-        gen = generation
         if player and player.poll() is None:
             player.terminate()
         player = None
+        return generation
+
+
+def start(text: str) -> None:
+    """Cut off whatever is playing and read text instead."""
+    gen = stop()
     def run() -> None:
         try:
             speak(text, gen)
@@ -185,7 +190,9 @@ def main() -> None:
             while chunk := conn.recv(65536):
                 data += chunk
         text = data.decode("utf-8", "replace").strip()
-        if text and text != "ping":
+        if text == "\x00stop":  # another engine is about to speak
+            stop()
+        elif text and text != "ping":
             start(text)
 
 

@@ -134,7 +134,13 @@ DEFAULTS = {
     "reactions": True,  # the short spoken reaction when a prompt is sent
     "speed": float(os.environ.get("KOKORO_SPEED", "1.2")),
     "voice": os.environ.get("KOKORO_VOICE", "af_heart"),  # used by the Kokoro server
+    "engine": "kokoro",  # kokoro (Kokoro when its server runs, else the system voice), elevenlabs, system
+    "elevenlabs_voice": "JBFqnCBsd6RMkjVDRZzb",  # ElevenLabs' default "George"
+    "elevenlabs_voice_name": "George",
+    "elevenlabs_model": os.environ.get("ELEVENLABS_MODEL", "eleven_multilingual_v2"),
 }
+ENGINES = ("kokoro", "elevenlabs", "system")
+ELEVENLABS = "https://api.elevenlabs.io/v1"
 # Kokoro's English voices, best-graded first in each group (VOICES.md in hexgrad/Kokoro-82M).
 VOICES = {
     "US female": ["af_heart", "af_bella", "af_nicole", "af_aoede", "af_kore", "af_sarah", "af_nova",
@@ -331,8 +337,10 @@ SETTING_NAMES = {"updates": "updates", "update": "updates", "progress": "updates
 
 
 def describe(s):
+    voice = s["elevenlabs_voice_name"] if s["engine"] == "elevenlabs" else s["voice"]
     return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
-            f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x; voice {s['voice']}")
+            f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x; engine {s['engine']}; "
+            f"voice {voice}")
 
 
 def voices_list():
@@ -345,14 +353,17 @@ def toggle(event):
       (nothing) | on | off        voice for this session
       updates|reactions [on|off]  mid-task updates / the spoken reaction, saved for every session
       speed <0.5-2.0>             speaking speed, saved for every session
-      voice <name> | voices       the Kokoro voice (heart, emma, af_bella…), saved; or list them
+      engine kokoro|elevenlabs|system   what speaks, saved for every session
+      voice <name> | voices       the voice for that engine (Kokoro: heart, emma…; ElevenLabs: a voice
+                                  name or id from your account), saved; or list them
       settings                    what's set now
     """
     m = TOGGLE.match(event.get("prompt") or "")
     sid = event.get("session_id") or ""
     if not m or not sid:
         return
-    args = m.group(1).lower().split()
+    raw = m.group(1).split()  # ElevenLabs voice ids are case-sensitive
+    args = [a.lower() for a in raw]
     flag = {"on": True, "off": False}
     if not args or args[0] in flag:
         want = flag[args[0]] if args else not voice_on(sid)
@@ -374,6 +385,27 @@ def toggle(event):
         else:
             save_setting("speed", speed)
             note = f"Read-aloud speed is now {speed:g}x (saved for every session)."
+    elif args[0] == "engine" and len(args) > 1:
+        if args[1] in ENGINES:
+            save_setting("engine", args[1])
+            note = f"Read-aloud now speaks with {args[1]} (saved for every session)."
+            if args[1] == "elevenlabs" and not elevenlabs_key():
+                note += (" No ElevenLabs API key was found, so it falls back to Kokoro or the system voice "
+                         "until one is set: add ELEVENLABS_API_KEY to the env block of ~/.claude/settings.json, "
+                         "or store it in the macOS Keychain under the service name 'elevenlabs'. Never paste the "
+                         "key into the chat.")
+        else:
+            note = f"'{args[1]}' isn't an engine. Engines: {', '.join(ENGINES)}."
+    elif args[0] == "voice" and len(args) > 1 and settings()["engine"] == "elevenlabs":
+        found = elevenlabs_find_voice(" ".join(raw[1:]))
+        if found:
+            save_setting("elevenlabs_voice", found[0])
+            save_setting("elevenlabs_voice_name", found[1])
+            note = f"ElevenLabs voice is now {found[1]} (saved for every session)."
+        else:
+            note = f"Couldn't find an ElevenLabs voice called '{' '.join(raw[1:])}'. " + elevenlabs_voices_list()
+    elif args[0] in ("voice", "voices") and settings()["engine"] == "elevenlabs":
+        note = elevenlabs_voices_list()
     elif args[0] == "voice" and len(args) > 1:
         name = args[1] if args[1] in ALL_VOICES else next((v for v in ALL_VOICES if v[3:] == args[1]), None)
         if name:
@@ -387,7 +419,8 @@ def toggle(event):
         note = "Read-aloud settings."
     else:
         note = (f"'{' '.join(args)}' isn't a read-aloud option. Options: on, off, updates on|off, "
-                "reactions on|off, speed <0.5-2.0>, voice <name>, voices, settings.")
+                "reactions on|off, speed <0.5-2.0>, engine kokoro|elevenlabs|system, voice <name>, voices, "
+                "settings.")
     now = describe(settings()).format(voice="on" if voice_on(sid) else "off")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
         f"{note} Current settings: {now}. Tell the user in one short sentence."}}))
@@ -502,6 +535,88 @@ def log(kind, engine, text):
         pass
 
 
+def elevenlabs_key():
+    """ELEVENLABS_API_KEY, else the macOS Keychain item with service name 'elevenlabs'."""
+    key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if key or not shutil.which("security"):
+        return key
+    try:
+        out = subprocess.run(["security", "find-generic-password", "-s", "elevenlabs", "-w"],
+                             capture_output=True, text=True, timeout=3)
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def elevenlabs_request(path, body=None, timeout=30):
+    req = urllib.request.Request(f"{ELEVENLABS}{path}", json.dumps(body).encode() if body else None,
+                                 {"xi-api-key": elevenlabs_key(), "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def elevenlabs_voices():
+    """[(voice_id, name)] in the account, or [] if there's no key or the call fails."""
+    if not elevenlabs_key():
+        return []
+    try:
+        data = json.loads(elevenlabs_request("/voices", timeout=4))
+        return [(v["voice_id"], v["name"]) for v in data.get("voices", [])]
+    except Exception:
+        return []
+
+
+def elevenlabs_find_voice(wanted):
+    """(voice_id, name) for a voice id or a name (case-insensitive, first word is enough)."""
+    voices = elevenlabs_voices()
+    for vid, name in voices:
+        if wanted == vid:
+            return vid, name
+    w = wanted.lower()
+    return next(((vid, name) for vid, name in voices if name.lower() == w), None) or \
+        next(((vid, name) for vid, name in voices if name.lower().split(" ")[0] == w), None) or \
+        ((wanted, wanted) if re.fullmatch(r"[A-Za-z0-9]{20}", wanted) and not voices else None)
+
+
+def elevenlabs_voices_list():
+    voices = elevenlabs_voices()
+    if not voices:
+        return ("Couldn't list ElevenLabs voices (no API key, or the request failed). You can still set one "
+                "by its 20-character voice id.")
+    return "ElevenLabs voices: " + ", ".join(name for _, name in voices[:40]) + \
+        ". Use /read-aloud voice <name>."
+
+
+def elevenlabs_speak(s):
+    """Synthesize s with ElevenLabs and start playing it; returns the player's argv[0] or raises."""
+    if not elevenlabs_key():
+        raise RuntimeError("no ElevenLabs API key")
+    cfg = settings()
+    audio = elevenlabs_request(
+        f"/text-to-speech/{cfg['elevenlabs_voice']}?output_format=mp3_44100_128",
+        {"text": s, "model_id": cfg["elevenlabs_model"],
+         "voice_settings": {"speed": round(min(1.2, max(0.7, cfg["speed"])), 2)}})  # its range is 0.7-1.2
+    path = os.path.join(tempfile.gettempdir(), "read-aloud-elevenlabs.mp3")
+    with open(path, "wb") as f:
+        f.write(audio)
+    for player in (["afplay", path], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+                   ["mpg123", "-q", path]):
+        if shutil.which(player[0]):
+            p = subprocess.Popen(player, start_new_session=True)
+            with open(PIDFILE, "w") as f:
+                f.write(str(p.pid))
+            return player[0]
+    raise RuntimeError("no audio player for mp3 (afplay, ffplay or mpg123)")
+
+
+def kokoro_send(text):
+    k = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    k.settimeout(2)
+    k.connect(SOCK)
+    k.sendall(text.encode("utf-8"))
+    k.close()
+
+
 def speak(s, kind="reply"):
     try:  # a fallback `say` still talking; the pid file goes once it's used, so a reused pid is safe
         pid = int(_read(PIDFILE))
@@ -514,16 +629,25 @@ def speak(s, kind="reply"):
             f.write(str(time.time()))
     except OSError:
         pass
-    try:  # the warm Kokoro server (kokoro-speak-server.py); it cuts off its own previous speech
-        k = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        k.settimeout(2)
-        k.connect(SOCK)
-        k.sendall(s.encode("utf-8"))
-        k.close()
-        log(kind, "kokoro", s)
-        return
-    except OSError:
-        pass
+    engine = settings()["engine"]
+    if engine == "elevenlabs":
+        try:
+            kokoro_send("\x00stop")  # Kokoro may still be reading the last line
+        except OSError:
+            pass
+        try:
+            elevenlabs_speak(s)
+            log(kind, "eleven", s)
+            return
+        except Exception as e:
+            log(kind, "-", f"ElevenLabs failed ({type(e).__name__}: {e}); falling back")
+    if engine != "system":
+        try:  # the warm Kokoro server (kokoro-speak-server.py); it cuts off its own previous speech
+            kokoro_send(s)
+            log(kind, "kokoro", s)
+            return
+        except OSError:
+            pass
     argv = tts_command(s)
     if not argv:
         log(kind, "none", "no speech engine found (say, spd-say or espeak)")
