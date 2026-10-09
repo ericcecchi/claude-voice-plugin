@@ -76,7 +76,7 @@ State lives in `~/.claude/read-aloud/on/<session id>` (`on` or `off`), so other 
    - store it in the macOS Keychain: `security add-generic-password -s elevenlabs -a "$USER" -w` (it prompts for the key).
 2. Run `/read-aloud engine elevenlabs`, then `/read-aloud voices` and `/read-aloud voice <name>` to pick a voice. A restricted key needs the Text to Speech permission to speak, and Voices (read) to list voices or pick one by name; without it, pick one by its voice id. A 20-character voice id always works, including Voice Library voices, and can be set before switching engines.
 
-It uses `eleven_v4` by default; `/read-aloud model eleven_v4_turbo` (or any model id) switches it and your speed setting, limited to ElevenLabs' 0.7–1.2 range. If a request fails, that line falls back to Kokoro or the system voice. ElevenLabs bills by character, so long replies cost more; the Haiku summary keeps them short.
+It uses `eleven_v4` by default; `/read-aloud model eleven_v4_turbo` (or any model id) switches it and your speed setting. Eleven v4 ignores the API's speed, so for v4 models the speed is applied during playback (pitch kept, the full 0.5–2.0 range); older models get it from the API, within ElevenLabs' 0.7–1.2. If a request fails, that line falls back to Kokoro or the system voice. ElevenLabs bills by character, so long replies cost more; the Haiku summary keeps them short.
 
 ## The voice button (experimental)
 

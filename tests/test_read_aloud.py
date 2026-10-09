@@ -165,8 +165,19 @@ class ElevenLabs(Toggle):
             self.real_speak("Hello there.")
         path, body = self.requests[-1]
         self.assertTrue(path.startswith("/text-to-speech/EXAVITQu4vr4xnSDxMaL?"))
-        self.assertEqual((body["text"], body["voice_settings"]["speed"]), ("Hello there.", 1.2))
-        self.assertEqual(self.played[-1][0], "afplay")
+        # v4 ignores the API's speed, so the player applies it, pitch kept
+        self.assertEqual((body["text"], body["voice_settings"]["speed"]), ("Hello there.", 1.0))
+        self.assertEqual(self.played[-1][:5], ["afplay", "-r", "1.6", "-q", "1"])
+
+    def test_older_models_get_speed_from_the_api(self):
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"), \
+                mock.patch.object(self.ra.shutil, "which", lambda n: "/usr/bin/" + n):
+            self.context("/read-aloud engine elevenlabs")
+            self.context("/read-aloud model eleven_multilingual_v2")
+            self.context("/read-aloud speed 1.6")
+            self.real_speak("Hello there.")
+        self.assertEqual(self.requests[-1][1]["voice_settings"]["speed"], 1.2)  # its 0.7-1.2 range
+        self.assertEqual(self.played[-1][:3], ["afplay", "-r", "1"])
 
     def test_model(self):
         self.assertEqual(self.ra.settings()["elevenlabs_model"], "eleven_v4")

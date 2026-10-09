@@ -617,14 +617,20 @@ def elevenlabs_speak(s):
     if not elevenlabs_key():
         raise RuntimeError("no ElevenLabs API key")
     cfg = settings()
+    # Eleven v4 accepts voice_settings.speed but ignores it (measured: the same length at 0.7-1.5),
+    # so for v4 the speed is applied by the player instead, pitch kept. Older models honour it,
+    # within ElevenLabs' 0.7-1.2.
+    local = cfg["elevenlabs_model"].startswith("eleven_v4")
+    api_speed = 1.0 if local else round(min(1.2, max(0.7, cfg["speed"])), 2)
+    rate = cfg["speed"] if local else 1.0
     audio = elevenlabs_request(
         f"/text-to-speech/{cfg['elevenlabs_voice']}?output_format=mp3_44100_128",
-        {"text": s, "model_id": cfg["elevenlabs_model"],
-         "voice_settings": {"speed": round(min(1.2, max(0.7, cfg["speed"])), 2)}})  # its range is 0.7-1.2
+        {"text": s, "model_id": cfg["elevenlabs_model"], "voice_settings": {"speed": api_speed}})
     path = os.path.join(tempfile.gettempdir(), "read-aloud-elevenlabs.mp3")
     with open(path, "wb") as f:
         f.write(audio)
-    for player in (["afplay", path], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path],
+    for player in (["afplay", "-r", f"{rate:g}", "-q", "1", path],  # -q 1: time-stretch, not chipmunk
+                   ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-af", f"atempo={rate:g}", path],
                    ["mpg123", "-q", path]):
         if shutil.which(player[0]):
             p = subprocess.Popen(player, start_new_session=True)
