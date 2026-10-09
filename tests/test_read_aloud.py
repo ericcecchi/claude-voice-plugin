@@ -168,6 +168,20 @@ class ElevenLabs(Toggle):
         self.assertEqual((body["text"], body["voice_settings"]["speed"]), ("Hello there.", 1.2))
         self.assertEqual(self.played[-1][0], "afplay")
 
+    def test_voice_id_is_taken_as_is(self):
+        vid = "pNInz6obpgDQGcFmaJgB"  # not in the account's list
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
+            self.context("/read-aloud engine elevenlabs")
+            self.assertIn(f"now {vid}", self.context(f"/read-aloud voice {vid}"))
+        self.assertEqual(self.ra.settings()["elevenlabs_voice"], vid)  # case kept
+
+    def test_voice_id_on_another_engine(self):
+        vid = "pNInz6obpgDQGcFmaJgB"
+        with mock.patch.object(self.ra, "elevenlabs_key", lambda: ""):
+            note = self.context(f"/read-aloud voice {vid}")
+        self.assertIn("once the engine is ElevenLabs", note)
+        self.assertEqual((self.ra.settings()["elevenlabs_voice"], self.ra.settings()["voice"]), (vid, "af_heart"))
+
     def test_unknown_voice_lists_the_account(self):
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
             self.context("/read-aloud engine elevenlabs")

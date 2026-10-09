@@ -396,12 +396,15 @@ def toggle(event):
                          "key into the chat.")
         else:
             note = f"'{args[1]}' isn't an engine. Engines: {', '.join(ENGINES)}."
-    elif args[0] == "voice" and len(args) > 1 and settings()["engine"] == "elevenlabs":
+    elif args[0] == "voice" and len(args) > 1 and (settings()["engine"] == "elevenlabs"
+                                                   or VOICE_ID.fullmatch(raw[1])):
         found = elevenlabs_find_voice(" ".join(raw[1:]))
         if found:
             save_setting("elevenlabs_voice", found[0])
             save_setting("elevenlabs_voice_name", found[1])
             note = f"ElevenLabs voice is now {found[1]} (saved for every session)."
+            if settings()["engine"] != "elevenlabs":
+                note += " It's used once the engine is ElevenLabs: /read-aloud engine elevenlabs."
         else:
             note = f"Couldn't find an ElevenLabs voice called '{' '.join(raw[1:])}'. " + elevenlabs_voices_list()
     elif args[0] in ("voice", "voices") and settings()["engine"] == "elevenlabs":
@@ -575,16 +578,21 @@ def elevenlabs_voices():
     return []
 
 
+VOICE_ID = re.compile(r"[A-Za-z0-9]{20}")  # an ElevenLabs voice id
+
+
 def elevenlabs_find_voice(wanted):
-    """(voice_id, name) for a voice id or a name (case-insensitive, first word is enough)."""
-    voices = elevenlabs_voices()
+    """(voice_id, name) for a voice id or a name (case-insensitive, first word is enough). Any
+    20-character id is taken as is, so Voice Library voices and keys without Voices (read) work."""
+    voices = elevenlabs_voices() if elevenlabs_key() else []
     for vid, name in voices:
         if wanted == vid:
             return vid, name
+    if VOICE_ID.fullmatch(wanted):
+        return wanted, wanted
     w = wanted.lower()
     return next(((vid, name) for vid, name in voices if name.lower() == w), None) or \
-        next(((vid, name) for vid, name in voices if name.lower().split(" ")[0] == w), None) or \
-        ((wanted, wanted) if re.fullmatch(r"[A-Za-z0-9]{20}", wanted) and not voices else None)
+        next(((vid, name) for vid, name in voices if name.lower().split(" ")[0] == w), None)
 
 
 def elevenlabs_voices_list():
