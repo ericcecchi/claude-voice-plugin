@@ -348,7 +348,7 @@ SETTING_NAMES = {"interrupt": "interrupt", "interrupts": "interrupt", "rotate": 
 
 
 def describe(s, sid=""):
-    v = session_voice(sid, active_engine())
+    v = voice_for(sid, active_engine())
     voice = v[1] if v else "the system voice"
     return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
             f"reactions {'on' if s['reactions'] else 'off'}; interrupt {'on' if s['interrupt'] else 'off'}; "
@@ -391,7 +391,7 @@ def toggle(event):
         note = f"Read-aloud voice is now {'ON' if want else 'OFF'} for this session."
         engine = active_engine()
         if want and engine in POOLS:
-            note += f" This session's voice is {session_voice(sid, engine)[1]}."
+            note += f" This session's voice is {voice_for(sid, engine)[1]}."
     elif args[0] in SETTING_NAMES:
         key = SETTING_NAMES[args[0]]
         want = flag.get(args[1], not settings()[key]) if len(args) > 1 else not settings()[key]
@@ -451,7 +451,7 @@ def toggle(event):
     elif args[0] in ("voice", "voices"):
         engine = active_engine() if active_engine() in POOLS else "kokoro"
         rotation = ", ".join(name for _, name in POOLS[engine])
-        mine = session_voice(sid, engine)
+        mine = voice_for(sid, engine)
         note = (f"This session's voice is {mine[1]}. New sessions take turns through: {rotation}. "
                 + (elevenlabs_voices_list() if engine == "elevenlabs" else voices_list()))
     elif args[0] in ("settings", "status"):
@@ -586,6 +586,22 @@ POOLS = {
     "kokoro": [("af_heart", "Heart"), ("am_fenrir", "Fenrir"), ("bf_emma", "Emma"), ("am_michael", "Michael"),
                ("af_bella", "Bella"), ("bm_george", "George"), ("af_nicole", "Nicole"), ("am_puck", "Puck")],
 }
+# Each ElevenLabs voice's Kokoro twin, matched by gender and accent, so a session that falls back
+# to Kokoro (no credits, a failed request) still sounds like itself, and sessions stay apart.
+KOKORO_TWIN = {
+    "JBFqnCBsd6RMkjVDRZzb": "bm_george",    # George: British male
+    "EXAVITQu4vr4xnSDxMaL": "af_bella",     # Sarah: American female
+    "onwK4e9ZLuTAKqWW03F9": "bm_fable",     # Daniel: British male
+    "FGY2WhTYpPnrIDTdsKH5": "af_nicole",    # Laura: American female
+    "IKne3meq5aSn9XLyUdCD": "am_puck",      # Charlie: Australian male
+    "XrExE9yKIg1WjnnlVkGX": "af_kore",      # Matilda: American female
+    "CwhRBWXzGAHq8TQ4Fs17": "am_michael",   # Roger: American male
+    "Xb7hH8MSUJpSbSDYk0k2": "bf_emma",      # Alice: British female
+    "nPczCjzI2devNBz1zQrb": "am_fenrir",    # Brian: American male, deep
+    "pFZP5JQG7iQjIQuC4Bku": "bf_isabella",  # Lily: British female
+    "cjVigY5qzO86Huf0OWal": "am_eric",      # Eric: American male
+    "cgSgspJ2msm6clMCkdW9": "af_heart",     # Jessica: American female
+}
 SESSION_VOICES = os.path.expanduser("~/.claude/read-aloud/session-voice")  # one file per session
 ACTIVE_FOR = 3 * 3600  # a session that spoke within this long still "has" its voice
 
@@ -655,6 +671,20 @@ def session_voice(sid, engine):
     voice = min(free, key=lambda v: (last_given.get(v[0], 0), pool.index(v)))
     set_session_voice(sid, engine, voice)
     return voice
+
+
+def voice_for(sid, engine):
+    """(voice id, name) a session speaks with on an engine. Kokoro, when the configured engine is
+    ElevenLabs (a fallback, or no key), is the twin of the session's ElevenLabs voice, unless a
+    Kokoro voice was chosen for the session with /read-aloud voice."""
+    if engine != "kokoro" or settings()["engine"] != "elevenlabs":
+        return session_voice(sid, engine)
+    chosen = _session_voices(sid).get("kokoro") if sid else None
+    if chosen:
+        return tuple(chosen)
+    eleven = session_voice(sid, "elevenlabs")
+    twin = KOKORO_TWIN.get(eleven[0])
+    return (twin, twin.split("_", 1)[1].capitalize()) if twin else session_voice(sid, "kokoro")
 
 
 def resolve_voice(engine, wanted):
@@ -879,7 +909,7 @@ def speak(s, kind="reply"):
             log(kind, "-", f"ElevenLabs failed ({type(e).__name__}: {e}); falling back")
     if engine != "system":
         try:  # the warm Kokoro server queues (or cuts off) by itself, the same way
-            kokoro_send(f"\x00kind={kind};voice={session_voice(SESSION['id'], 'kokoro')[0]}\x00{s}")
+            kokoro_send(f"\x00kind={kind};voice={voice_for(SESSION['id'], 'kokoro')[0]}\x00{s}")
             log(kind, "kokoro", s)
             return
         except OSError:

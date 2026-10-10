@@ -223,7 +223,7 @@ class ElevenLabs(Toggle):
                 mock.patch.object(self.ra, "kokoro_send", lambda t: sent.append(t)):
             self.context("/read-aloud engine elevenlabs")
             self.real_speak("Hello there.")
-        self.assertEqual(sent, ["\x00kind=reply;voice=af_heart\x00Hello there."])
+        self.assertEqual(sent, ["\x00kind=reply;voice=bm_george\x00Hello there."])  # George's twin
 
 
 class Rotation(Base):
@@ -268,7 +268,31 @@ class Rotation(Base):
     def test_turning_voice_on_names_the_voice(self):
         with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.ra.toggle({"prompt": "/read-aloud on", "session_id": "s1"})
-        self.assertIn("This session's voice is Heart", out.getvalue())
+        self.assertIn("This session's voice is George", out.getvalue())  # Kokoro's George, no key
+
+    def test_fallback_uses_the_elevenlabs_voices_twin(self):
+        twins = [self.ra.voice_for(f"s{i}", "kokoro")[0] for i in range(4)]
+        elevens = [self.ra.voice_for(f"s{i}", "elevenlabs")[0] for i in range(4)]
+        self.assertEqual(twins, [self.ra.KOKORO_TWIN[e] for e in elevens])
+        self.assertEqual(len(set(twins)), 4)  # sessions still sound different on Kokoro
+
+    def test_every_twin_is_distinct_and_a_kokoro_voice(self):
+        twins = list(self.ra.KOKORO_TWIN.values())
+        self.assertEqual(len(set(twins)), len(twins))
+        self.assertTrue(set(twins) <= self.ra.ALL_VOICES)
+        self.assertEqual(set(self.ra.KOKORO_TWIN), {v for v, _ in self.ra.POOLS["elevenlabs"]})
+
+    def test_a_chosen_kokoro_voice_beats_the_twin(self):
+        self.ra.set_session_voice("a", "kokoro", ("bf_lily", "Lily"))
+        self.assertEqual(self.ra.voice_for("a", "kokoro")[0], "bf_lily")
+
+    def test_a_custom_elevenlabs_voice_falls_back_to_the_kokoro_rotation(self):
+        self.ra.set_session_voice("a", "elevenlabs", ("pNInz6obpgDQGcFmaJgB", "custom"))
+        self.assertEqual(self.ra.voice_for("a", "kokoro")[0], "af_heart")
+
+    def test_kokoro_engine_rotates_its_own_voices(self):
+        self.ra.save_setting("engine", "kokoro")
+        self.assertEqual(self.ra.voice_for("a", "kokoro")[0], "af_heart")
 
     def test_kokoro_gets_the_sessions_voice(self):
         sent = []
