@@ -107,12 +107,16 @@ class Settings(Toggle):
         self.assertEqual(self.ra.tts_command("hi")[2], "350") if self.ra.shutil.which("say") else None
 
     def test_voice(self):
-        self.assertEqual(self.ra.settings()["voice"], "af_heart")
-        self.assertIn("now bf_emma", self.context("/read-aloud voice emma"))  # short name
-        self.assertIn("now am_fenrir", self.context("/read-aloud voice am_fenrir"))
-        self.assertIn("isn't a Kokoro voice", self.context("/read-aloud voice robot"))
-        self.assertEqual(self.ra.settings()["voice"], "am_fenrir")
-        self.assertIn("US female: heart", self.context("/read-aloud voices"))
+        self.assertIn("now Emma", self.context("/read-aloud voice emma"))  # short name
+        self.assertIn("now Fenrir", self.context("/read-aloud voice am_fenrir"))  # its pool name
+        self.assertIn("Couldn't find a Kokoro voice", self.context("/read-aloud voice robot"))
+        self.assertEqual(self.ra.session_voice("s1", "kokoro")[0], "am_fenrir")  # this session only
+        self.assertEqual(self.ra.settings()["voice"], "af_heart")  # the default is untouched
+        self.assertIn("default Kokoro voice is now", self.context("/read-aloud default-voice bella"))
+        self.assertEqual(self.ra.settings()["voice"], "af_bella")
+        note = self.context("/read-aloud voices")
+        self.assertIn("This session's voice is Fenrir", note)
+        self.assertIn("US female: heart", note)
 
     def test_settings_and_unknown(self):
         self.assertIn("speed 1.2x", self.context("/read-aloud settings"))
@@ -161,7 +165,8 @@ class ElevenLabs(Toggle):
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"), \
                 mock.patch.object(self.ra.shutil, "which", lambda n: "/usr/bin/" + n):
             self.context("/read-aloud engine elevenlabs")
-            self.assertIn("now Sarah", self.context("/read-aloud voice sarah"))  # first word of the name
+            self.assertIn("now Sarah", self.context("/read-aloud voice sarah"))
+            self.ra.SESSION["id"] = "s1"  # the session the voice was set for
             self.context("/read-aloud speed 1.6")
             self.real_speak("Hello there.")
         path, body = self.requests[-1]
@@ -191,14 +196,15 @@ class ElevenLabs(Toggle):
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
             self.context("/read-aloud engine elevenlabs")
             self.assertIn(f"now {vid}", self.context(f"/read-aloud voice {vid}"))
-        self.assertEqual(self.ra.settings()["elevenlabs_voice"], vid)  # case kept
+        self.assertEqual(self.ra.session_voice("s1", "elevenlabs")[0], vid)  # case kept
 
     def test_voice_id_on_another_engine(self):
         vid = "pNInz6obpgDQGcFmaJgB"
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: ""):
             note = self.context(f"/read-aloud voice {vid}")
-        self.assertIn("once the engine is ElevenLabs", note)
-        self.assertEqual((self.ra.settings()["elevenlabs_voice"], self.ra.settings()["voice"]), (vid, "af_heart"))
+        self.assertIn("once the engine is elevenlabs", note)
+        self.assertEqual(self.ra.session_voice("s1", "elevenlabs")[0], vid)
+        self.assertEqual(self.ra.settings()["engine"], "kokoro")
 
     def test_unknown_voice_lists_the_account(self):
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
@@ -216,7 +222,60 @@ class ElevenLabs(Toggle):
                 mock.patch.object(self.ra, "kokoro_send", lambda t: sent.append(t)):
             self.context("/read-aloud engine elevenlabs")
             self.real_speak("Hello there.")
-        self.assertEqual(sent, ["\x00kind=reply\x00Hello there."])
+        self.assertEqual(sent, ["\x00kind=reply;voice=af_heart\x00Hello there."])
+
+
+class Rotation(Base):
+    """Each new session gets its own voice, so sessions sound different."""
+
+    def test_sessions_get_different_voices(self):
+        voices = [self.ra.session_voice(f"s{i}", "kokoro")[0] for i in range(4)]
+        self.assertEqual(len(set(voices)), 4)
+        self.assertEqual(voices[0], "af_heart")  # the pool's first voice goes first
+
+    def test_a_session_keeps_its_voice(self):
+        first = self.ra.session_voice("a", "elevenlabs")
+        self.ra.session_voice("b", "elevenlabs")
+        self.assertEqual(self.ra.session_voice("a", "elevenlabs"), first)
+
+    def test_engines_are_separate(self):
+        self.assertEqual(self.ra.session_voice("a", "kokoro")[1], "Heart")
+        self.assertEqual(self.ra.session_voice("a", "elevenlabs")[1], "George")
+        self.assertIsNone(self.ra.session_voice("a", "system"))
+
+    def test_rotate_off_uses_the_default(self):
+        self.ra.save_setting("rotate", False)
+        self.ra.save_setting("voice", "bf_emma")
+        self.assertEqual(self.ra.session_voice("a", "kokoro")[0], "bf_emma")
+        self.assertEqual(self.ra.session_voice("b", "kokoro")[0], "bf_emma")
+
+    def test_when_every_voice_is_taken_the_least_recent_comes_back(self):
+        pool = self.ra.POOLS["kokoro"]
+        for i in range(len(pool)):
+            self.ra.session_voice(f"s{i}", "kokoro")
+            time.sleep(0.01)
+        self.assertEqual(self.ra.session_voice("extra", "kokoro")[0], pool[0][0])
+
+    def test_an_idle_sessions_voice_is_free_again(self):
+        self.ra.session_voice("old", "kokoro")  # takes Heart
+        stale = time.time() - self.ra.ACTIVE_FOR - 60
+        os.utime(self.ra._session_file("old"), (stale, stale))
+        self.assertEqual(self.ra.session_voice("new", "kokoro")[0], "am_fenrir")  # least recently given
+        os.utime(self.ra._session_file("new"), (stale, stale))
+        self.assertEqual(self.ra.session_voice("newer", "kokoro")[0], "bf_emma")
+
+    def test_turning_voice_on_names_the_voice(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.ra.toggle({"prompt": "/read-aloud on", "session_id": "s1"})
+        self.assertIn("This session's voice is Heart", out.getvalue())
+
+    def test_kokoro_gets_the_sessions_voice(self):
+        sent = []
+        self.ra.kokoro_send = sent.append
+        self.ra.SESSION["id"] = "x"
+        self.ra.set_session_voice("x", "kokoro", ("bm_george", "George"))
+        self.real_speak("Hi.", "reply")
+        self.assertEqual(sent, ["\x00kind=reply;voice=bm_george\x00Hi."])
 
 
 class Queueing(Base):

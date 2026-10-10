@@ -5,7 +5,8 @@ Loads Kokoro-82M once and keeps it in memory. It listens on a Unix socket (~/.cl
 takes UTF-8 text, synthesizes it, and plays it with `afplay`, sentence by sentence, so long text
 starts at once. Lines queue, one after another; a reaction that would have to wait is dropped.
 With `/read-aloud interrupt on` a new line cuts off the one playing instead. "\\x00stop" only cuts
-it off; "\\x00kind=<kind>\\x00<text>" says what kind of line the text is.
+it off; "\\x00kind=<kind>;voice=<id>\\x00<text>" says what kind of line it is and which voice
+reads it (each session has its own).
 When this server isn't running, the hook falls back to macOS `say`.
 
 Needs a Python venv with `kokoro soundfile numpy torch` and `brew install espeak-ng`. See the
@@ -85,10 +86,17 @@ def speed() -> float:
         return SPEED
 
 
-def voice() -> str:
-    """`/read-aloud voice` if it names an English Kokoro voice (a… US, b… UK), else VOICE."""
+def is_voice(v) -> bool:
+    """An English Kokoro voice id: a… US, b… UK."""
+    return isinstance(v, str) and len(v) > 3 and v[0] in "ab" and v[2] == "_"
+
+
+def voice(wanted: str = "") -> str:
+    """The voice a line asked for, else the saved default, else VOICE."""
+    if is_voice(wanted):
+        return wanted
     v = setting("voice", VOICE)
-    return v if isinstance(v, str) and len(v) > 3 and v[0] in "ab" and v[2] == "_" else VOICE
+    return v if is_voice(v) else VOICE
 
 
 SR = 24000
@@ -112,15 +120,15 @@ generation = 0  # bumped by each request; a reading still running for an older o
 synth = threading.Lock()  # one synthesis at a time; an outdated one gives way at its next segment
 
 
-def speak(text: str, gen: int) -> None:
+def speak(text: str, gen: int, wanted: str = "") -> None:
     """Synthesize and play segment by segment, so a long reply starts at once and is never cut short."""
     with synth:
-        _speak(text, gen)
+        _speak(text, gen, wanted)
 
 
-def _speak(text: str, gen: int) -> None:
+def _speak(text: str, gen: int, wanted: str = "") -> None:
     global player
-    v = voice()
+    v = voice(wanted)
     try:
         chunks = pipeline(v[0])(text, voice=v, speed=speed())
         first = next(chunks, None)
@@ -165,31 +173,31 @@ def stop() -> int:
         return generation
 
 
-lines: "queue.Queue[tuple[str, int]]" = queue.Queue()
+lines: "queue.Queue[tuple[str, int, str]]" = queue.Queue()
 busy = threading.Event()  # set while a line is being synthesized or played
 
 
-def start(text: str, kind: str = "reply") -> None:
+def start(text: str, kind: str = "reply", wanted: str = "") -> None:
     """Read text. With `/read-aloud interrupt on`, cut off whatever is playing first; otherwise
     queue it behind the line playing, except a reaction ("ack"), which is dropped if it would wait."""
     if setting("interrupt", False) is True:
-        lines.put((text, stop()))
+        lines.put((text, stop(), wanted))
         return
     if kind == "ack" and (busy.is_set() or not lines.empty()):
         print(f"skipped a reaction while speaking: {text[:60]}", flush=True)
         return
-    lines.put((text, generation))
+    lines.put((text, generation, wanted))
 
 
 def worker() -> None:
     """Reads queued lines one after another."""
     while True:
-        text, gen = lines.get()
+        text, gen, wanted = lines.get()
         if gen != generation:  # queued before an interrupt
             continue
         busy.set()
         try:
-            speak(text, gen)
+            speak(text, gen, wanted)
             with lock:
                 last = player
             if last:
@@ -218,13 +226,15 @@ def main() -> None:
             while chunk := conn.recv(65536):
                 data += chunk
         text = data.decode("utf-8", "replace").strip()
-        kind = "reply"
-        if text.startswith("\x00kind="):  # "\x00kind=ack\x00<text>" from the hook
-            kind, _, text = text[len("\x00kind="):].partition("\x00")
+        fields = {}
+        if text.startswith("\x00kind="):  # "\x00kind=ack;voice=af_bella\x00<text>" from the hook
+            header, _, text = text[1:].partition("\x00")
+            fields = dict(f.partition("=")[::2] for f in header.split(";"))
+        kind, wanted = fields.get("kind", "reply"), fields.get("voice", "")
         if text == "\x00stop":  # another engine is about to speak
             stop()
         elif text and text != "ping":
-            start(text, kind)
+            start(text, kind, wanted)
 
 
 if __name__ == "__main__":

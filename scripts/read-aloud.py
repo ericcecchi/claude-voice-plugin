@@ -135,6 +135,7 @@ DEFAULTS = {
     "speed": float(os.environ.get("KOKORO_SPEED", "1.2")),
     "voice": os.environ.get("KOKORO_VOICE", "af_heart"),  # used by the Kokoro server
     "interrupt": False,  # False: a new line waits for the one playing; True: it cuts it off
+    "rotate": True,  # each new session gets its own voice, so sessions can be told apart
     "engine": "kokoro",  # kokoro (Kokoro when its server runs, else the system voice), elevenlabs, system
     "elevenlabs_voice": "JBFqnCBsd6RMkjVDRZzb",  # ElevenLabs' default "George"
     "elevenlabs_voice_name": "George",
@@ -341,17 +342,18 @@ def save_setting(key, value):
         json.dump(current, f, indent=2)
 
 
-SETTING_NAMES = {"interrupt": "interrupt", "interrupts": "interrupt",
+SETTING_NAMES = {"interrupt": "interrupt", "interrupts": "interrupt", "rotate": "rotate",
                  "updates": "updates", "update": "updates", "progress": "updates",
                  "reactions": "reactions", "reaction": "reactions", "acks": "reactions", "ack": "reactions"}
 
 
-def describe(s):
-    voice = s["elevenlabs_voice_name"] if s["engine"] == "elevenlabs" else s["voice"]
+def describe(s, sid=""):
+    v = session_voice(sid, s["engine"])
+    voice = v[1] if v else "the system voice"
     return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
             f"reactions {'on' if s['reactions'] else 'off'}; interrupt {'on' if s['interrupt'] else 'off'}; "
             f"speed {s['speed']:g}x; engine {s['engine']}; "
-            f"voice {voice}" + (f"; model {s['elevenlabs_model']}" if s["engine"] == "elevenlabs" else ""))
+            f"rotate {'on' if s['rotate'] else 'off'}; this session's voice {voice}" + (f"; model {s['elevenlabs_model']}" if s["engine"] == "elevenlabs" else ""))
 
 
 def voices_list():
@@ -367,8 +369,10 @@ def toggle(event):
       speed <0.5-2.0>             speaking speed, saved for every session
       engine kokoro|elevenlabs|system   what speaks, saved for every session
       model <id>                  the ElevenLabs model (eleven_v4, eleven_v4_turbo…), saved
-      voice <name> | voices       the voice for that engine (Kokoro: heart, emma…; ElevenLabs: a voice
-                                  name or id from your account), saved; or list them
+      voice <name> | voices       this session's voice for the engine (Kokoro: heart, emma…; ElevenLabs:
+                                  George, Sarah… or a voice id); or list them
+      default-voice <name>        the voice every session uses when rotate is off, saved
+      rotate [on|off]             give each new session its own voice (default on), saved
       settings                    what's set now
     """
     m = TOGGLE.match(event.get("prompt") or "")
@@ -384,13 +388,17 @@ def toggle(event):
         with open(os.path.join(ON_DIR, sid), "w") as f:
             f.write("on" if want else "off")
         note = f"Read-aloud voice is now {'ON' if want else 'OFF'} for this session."
+        engine = settings()["engine"]
+        if want and engine in POOLS:
+            note += f" This session's voice is {session_voice(sid, engine)[1]}."
     elif args[0] in SETTING_NAMES:
         key = SETTING_NAMES[args[0]]
         want = flag.get(args[1], not settings()[key]) if len(args) > 1 else not settings()[key]
         save_setting(key, want)
         what = {"updates": "Mid-task updates", "reactions": "Spoken reactions to new prompts",
-                "interrupt": "Interrupting (new speech cutting off what's playing)"}[key]
-        note = f"{what} {'is' if key == 'interrupt' else 'are'} now {'ON' if want else 'OFF'} (saved for every session)."
+                "interrupt": "Interrupting (new speech cutting off what's playing)",
+                "rotate": "Giving each new session its own voice"}[key]
+        note = f"{what} {'are' if key in ('updates', 'reactions') else 'is'} now {'ON' if want else 'OFF'} (saved for every session)."
     elif args[0] == "speed" and len(args) > 1:
         try:
             speed = round(min(2.0, max(0.5, float(args[1].rstrip("x")))), 2)
@@ -417,35 +425,41 @@ def toggle(event):
                          "key into the chat.")
         else:
             note = f"'{args[1]}' isn't an engine. Engines: {', '.join(ENGINES)}."
-    elif args[0] == "voice" and len(args) > 1 and (settings()["engine"] == "elevenlabs"
-                                                   or VOICE_ID.fullmatch(raw[1])):
-        found = elevenlabs_find_voice(" ".join(raw[1:]))
-        if found:
-            save_setting("elevenlabs_voice", found[0])
-            save_setting("elevenlabs_voice_name", found[1])
-            note = f"ElevenLabs voice is now {found[1]} (saved for every session)."
-            if settings()["engine"] != "elevenlabs":
-                note += " It's used once the engine is ElevenLabs: /read-aloud engine elevenlabs."
+    elif args[0] in ("voice", "default-voice") and len(args) > 1:
+        engine = settings()["engine"]
+        if engine == "system" or (VOICE_ID.fullmatch(raw[1]) and engine != "elevenlabs"):
+            engine = "elevenlabs" if VOICE_ID.fullmatch(raw[1]) else "kokoro"
+        found = resolve_voice(engine, " ".join(raw[1:]))
+        label = "ElevenLabs" if engine == "elevenlabs" else "Kokoro"
+        if not found:
+            note = f"Couldn't find a {label} voice called '{' '.join(raw[1:])}'. " + \
+                (elevenlabs_voices_list() if engine == "elevenlabs" else voices_list())
+        elif args[0] == "voice":
+            set_session_voice(sid, engine, found)
+            note = f"This session's {label} voice is now {found[1]} (other sessions keep theirs)."
         else:
-            note = f"Couldn't find an ElevenLabs voice called '{' '.join(raw[1:])}'. " + elevenlabs_voices_list()
-    elif args[0] in ("voice", "voices") and settings()["engine"] == "elevenlabs":
-        note = elevenlabs_voices_list()
-    elif args[0] == "voice" and len(args) > 1:
-        name = args[1] if args[1] in ALL_VOICES else next((v for v in ALL_VOICES if v[3:] == args[1]), None)
-        if name:
-            save_setting("voice", name)
-            note = f"Read-aloud voice is now {name} (saved for every session; used when Kokoro is running)."
-        else:
-            note = f"'{args[1]}' isn't a Kokoro voice. " + voices_list()
+            if engine == "elevenlabs":
+                save_setting("elevenlabs_voice", found[0])
+                save_setting("elevenlabs_voice_name", found[1])
+            else:
+                save_setting("voice", found[0])
+            note = (f"The default {label} voice is now {found[1]}. Sessions use it when rotate is off; "
+                    "with rotate on, each new session still gets its own.")
+        if found and engine != settings()["engine"]:
+            note += f" It's used once the engine is {engine}: /read-aloud engine {engine}."
     elif args[0] in ("voice", "voices"):
-        note = voices_list()
+        engine = settings()["engine"] if settings()["engine"] in POOLS else "kokoro"
+        rotation = ", ".join(name for _, name in POOLS[engine])
+        mine = session_voice(sid, engine)
+        note = (f"This session's voice is {mine[1]}. New sessions take turns through: {rotation}. "
+                + (elevenlabs_voices_list() if engine == "elevenlabs" else voices_list()))
     elif args[0] in ("settings", "status"):
         note = "Read-aloud settings."
     else:
         note = (f"'{' '.join(args)}' isn't a read-aloud option. Options: on, off, updates on|off, "
-                "reactions on|off, interrupt on|off, speed <0.5-2.0>, engine kokoro|elevenlabs|system, voice <name>, voices, "
+                "reactions on|off, interrupt on|off, rotate on|off, speed <0.5-2.0>, engine kokoro|elevenlabs|system, voice <name>, default-voice <name>, voices, "
                 "model <id>, settings.")
-    now = describe(settings()).format(voice="on" if voice_on(sid) else "off")
+    now = describe(settings(), sid).format(voice="on" if voice_on(sid) else "off")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
         f"{note} Current settings: {now}. Tell the user in one short sentence."}}))
 
@@ -559,6 +573,95 @@ def log(kind, engine, text):
         pass
 
 
+# Voices handed out to sessions in turn, so each session sounds different. ElevenLabs' premade
+# voices are in every account; Kokoro's are its best-graded English voices.
+POOLS = {
+    "elevenlabs": [("JBFqnCBsd6RMkjVDRZzb", "George"), ("EXAVITQu4vr4xnSDxMaL", "Sarah"),
+                   ("onwK4e9ZLuTAKqWW03F9", "Daniel"), ("FGY2WhTYpPnrIDTdsKH5", "Laura"),
+                   ("IKne3meq5aSn9XLyUdCD", "Charlie"), ("XrExE9yKIg1WjnnlVkGX", "Matilda"),
+                   ("CwhRBWXzGAHq8TQ4Fs17", "Roger"), ("Xb7hH8MSUJpSbSDYk0k2", "Alice"),
+                   ("nPczCjzI2devNBz1zQrb", "Brian"), ("pFZP5JQG7iQjIQuC4Bku", "Lily"),
+                   ("cjVigY5qzO86Huf0OWal", "Eric"), ("cgSgspJ2msm6clMCkdW9", "Jessica")],
+    "kokoro": [("af_heart", "Heart"), ("am_fenrir", "Fenrir"), ("bf_emma", "Emma"), ("am_michael", "Michael"),
+               ("af_bella", "Bella"), ("bm_george", "George"), ("af_nicole", "Nicole"), ("am_puck", "Puck")],
+}
+SESSION_VOICES = os.path.expanduser("~/.claude/read-aloud/session-voice")  # one file per session
+ACTIVE_FOR = 3 * 3600  # a session that spoke within this long still "has" its voice
+
+
+def default_voice(engine):
+    cfg = settings()
+    if engine == "elevenlabs":
+        return cfg["elevenlabs_voice"], cfg["elevenlabs_voice_name"]
+    return cfg["voice"], cfg["voice"]
+
+
+def _session_file(sid):
+    return os.path.join(SESSION_VOICES, re.sub(r"[^\w-]", "", sid))
+
+
+def _session_voices(sid):
+    try:
+        return json.loads(_read(_session_file(sid)))
+    except (OSError, ValueError):
+        return {}
+
+
+def set_session_voice(sid, engine, voice):
+    data = _session_voices(sid)
+    data[engine] = list(voice)
+    os.makedirs(SESSION_VOICES, exist_ok=True)
+    with open(_session_file(sid), "w") as f:
+        json.dump(data, f)
+
+
+def session_voice(sid, engine):
+    """(voice id, name) for this session and engine. With rotate on, a session's first line picks
+    the pool voice no recently active session is using, least recently handed out first."""
+    if engine not in POOLS:
+        return None
+    if not sid:
+        return default_voice(engine)
+    mine = _session_voices(sid).get(engine)
+    if mine:
+        try:
+            os.utime(_session_file(sid))  # still active
+        except OSError:
+            pass
+        return tuple(mine)
+    if not settings()["rotate"]:
+        return default_voice(engine)
+    taken, last_given = set(), {}
+    try:
+        for name in os.listdir(SESSION_VOICES):
+            path = os.path.join(SESSION_VOICES, name)
+            data = json.loads(_read(path))
+            v = data.get(engine)
+            if v:
+                last_given[v[0]] = max(last_given.get(v[0], 0), os.path.getctime(path))
+                if time.time() - os.path.getmtime(path) < ACTIVE_FOR:
+                    taken.add(v[0])
+    except (OSError, ValueError):
+        pass
+    pool = POOLS[engine]
+    free = [v for v in pool if v[0] not in taken] or pool
+    voice = min(free, key=lambda v: (last_given.get(v[0], 0), pool.index(v)))
+    set_session_voice(sid, engine, voice)
+    return voice
+
+
+def resolve_voice(engine, wanted):
+    """(voice id, name) for a name or id on that engine, or None."""
+    w = wanted.lower()
+    for vid, name in POOLS.get(engine, []):
+        if w in (vid.lower(), name.lower()):
+            return vid, name
+    if engine == "elevenlabs":
+        return elevenlabs_find_voice(wanted)
+    name = w if w in ALL_VOICES else next((v for v in ALL_VOICES if v[3:] == w), None)
+    return (name, name) if name else None
+
+
 def elevenlabs_key():
     """ELEVENLABS_API_KEY, else the macOS Keychain item with service name 'elevenlabs'."""
     key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
@@ -625,7 +728,7 @@ def elevenlabs_voices_list():
         ". Use /read-aloud voice <name>."
 
 
-def elevenlabs_audio(s):
+def elevenlabs_audio(s, voice_id=None):
     """Synthesize s with ElevenLabs; returns (mp3 path, playback rate) or raises."""
     if not elevenlabs_key():
         raise RuntimeError("no ElevenLabs API key")
@@ -636,7 +739,7 @@ def elevenlabs_audio(s):
     local = cfg["elevenlabs_model"].startswith("eleven_v4")
     api_speed = 1.0 if local else round(min(1.2, max(0.7, cfg["speed"])), 2)
     audio = elevenlabs_request(
-        f"/text-to-speech/{cfg['elevenlabs_voice']}?output_format=mp3_44100_128",
+        f"/text-to-speech/{voice_id or cfg['elevenlabs_voice']}?output_format=mp3_44100_128",
         {"text": s, "model_id": cfg["elevenlabs_model"], "voice_settings": {"speed": api_speed}})
     folder = os.path.join(tempfile.gettempdir(), "read-aloud")
     os.makedirs(folder, exist_ok=True)
@@ -733,6 +836,9 @@ def kokoro_send(text):
     k.close()
 
 
+SESSION = {"id": ""}  # the session this hook runs for; its voice is looked up per line
+
+
 def speak(s, kind="reply"):
     """Say s with the configured engine. By default a line waits for the one playing to finish
     (a reaction that would have to wait is dropped); `/read-aloud interrupt on` cuts it off instead."""
@@ -758,14 +864,15 @@ def speak(s, kind="reply"):
     engine = cfg["engine"]
     if engine == "elevenlabs":
         try:
-            path, rate = elevenlabs_audio(s)  # synthesize while the line before is still playing
+            path, rate = elevenlabs_audio(s, session_voice(SESSION["id"], "elevenlabs")[0])  # synthesize
+            # now, while the line before is still playing
             start(lambda: play_mp3(path, rate), "eleven")
             return
         except Exception as e:
             log(kind, "-", f"ElevenLabs failed ({type(e).__name__}: {e}); falling back")
     if engine != "system":
         try:  # the warm Kokoro server queues (or cuts off) by itself, the same way
-            kokoro_send(f"\x00kind={kind}\x00{s}")
+            kokoro_send(f"\x00kind={kind};voice={session_voice(SESSION['id'], 'kokoro')[0]}\x00{s}")
             log(kind, "kokoro", s)
             return
         except OSError:
@@ -859,6 +966,7 @@ def main():
     event = json.load(sys.stdin)
     if sys.argv[1:] == ["toggle"]:
         return toggle(event)
+    SESSION["id"] = event.get("session_id") or ""
     if not voice_on(event.get("session_id")):
         return  # off by default; `/read-aloud` turns it on for this session
     cwd = os.path.normpath(event.get("cwd") or os.getcwd()) + "/"

@@ -2,6 +2,7 @@
 
 A Claude Code plugin that reads Claude's replies out loud, so you can look away from the screen while it works.
 
+- **A voice per session.** Each session gets its own voice, so with several sessions running you can tell which one is talking; turning voice on says which voice the session has.
 - **Off by default.** `/read-aloud` toggles it for the current session; `/read-aloud on` and `/read-aloud off` set it. A **Voice on / Voice off** button does the same: just above the prompt in the desktop app, in the prompt footer in the terminal (experimental, see below).
 - **Replies:** when Claude finishes, Claude Haiku sums up the final message for the ear, warmer and more conversational than the written reply: the outcome, anything you need to do or decide, and any question for you, at a length that fits. Short replies are read as they are. If Haiku is slow or missing, it reads the message minus code, tables and pleasantries.
 - **Acknowledgment:** a beat after you send a prompt, it reacts out loud in a sentence or two, so there's no dead air. The line comes from Claude Haiku (through `claude -p`, on your Claude login); if Haiku is slow or missing, from a local [Ollama](https://ollama.com) model; otherwise it's a canned one.
@@ -44,8 +45,10 @@ These are saved for every session (in `~/.claude/read-aloud/config.json`):
 | `/read-aloud interrupt on\|off` | off | Off: a new line waits for the one playing to finish (a reaction that would have to wait is skipped). On: new speech cuts off what's playing. |
 | `/read-aloud speed 1.3` | `1.2` | Speaking speed, 0.5 to 2.0, for Kokoro and the system voice. |
 | `/read-aloud engine elevenlabs` | `kokoro` | What speaks: `kokoro` (Kokoro when its server runs, else the system voice), `elevenlabs`, or `system`. |
-| `/read-aloud voice heart` | `af_heart` / George | The voice for the current engine: a Kokoro name (`heart`, `emma`, `am_fenrir`), or an ElevenLabs voice name or id from your account. |
-| `/read-aloud voices` | | Lists the current engine's voices. |
+| `/read-aloud rotate on\|off` | on | Each new session gets its own voice, so you can tell sessions apart by ear. Off: every session uses the default voice. |
+| `/read-aloud voice heart` | | This session's voice only: a Kokoro name (`heart`, `emma`, `am_fenrir`), or an ElevenLabs name (`George`, `Sarah`) or voice id. |
+| `/read-aloud default-voice heart` | `af_heart` / George | The voice sessions use when rotate is off. |
+| `/read-aloud voices` | | This session's voice, the rotation, and the engine's voices. |
 | `/read-aloud settings` | | Shows what's set now. |
 
 `/read-aloud`, `/read-aloud on` and `/read-aloud off` turn the voice on or off for the current session only.
