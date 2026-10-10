@@ -3,7 +3,7 @@
 A Claude Code plugin that reads Claude's replies out loud, so you can look away from the screen while it works.
 
 - **Off by default.** `/read-aloud` toggles it for the current session; `/read-aloud on` and `/read-aloud off` set it. A **Voice on / Voice off** button does the same: just above the prompt in the desktop app, in the prompt footer in the terminal (experimental, see below).
-- **Replies:** when Claude finishes, Claude Haiku sums up the final message for the ear: the outcome, anything you need to do or decide, and any question for you, at a length that fits. Short replies are read as they are. If Haiku is slow or missing, it reads the message minus code, tables and pleasantries.
+- **Replies:** when Claude finishes, Claude Haiku sums up the final message for the ear, warmer and more conversational than the written reply: the outcome, anything you need to do or decide, and any question for you, at a length that fits. Short replies are read as they are. If Haiku is slow or missing, it reads the message minus code, tables and pleasantries.
 - **Acknowledgment:** a beat after you send a prompt, it reacts out loud in a sentence or two, so there's no dead air. The line comes from Claude Haiku (through `claude -p`, on your Claude login); if Haiku is slow or missing, from a local [Ollama](https://ollama.com) model; otherwise it's a canned one.
 - **Updates (off by default):** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
 - **Questions:** when an `AskUserQuestion` prompt opens, it gives a short heads-up.
