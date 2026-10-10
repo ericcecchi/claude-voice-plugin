@@ -144,7 +144,7 @@ claude plugin validate .
 claude plugin test .
 ```
 
-Installed copies run from Claude Code's plugin cache, which refreshes only when the version changes: bump `version` in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` with every change, then run `claude plugin update read-aloud@claude-voice`.
+Installed copies run from Claude Code's plugin cache, which refreshes only when the version changes: bump `version` in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` with every change, then run `claude plugin update read-aloud@claude-voice`. The hooks go through `scripts/launch.py`, which runs the newest installed version, so script changes reach sessions that are already open; changes to `hooks/hooks.json` itself still need a new session. Each line in `~/.claude/read-aloud.log` names the version that spoke it.
 
 ## License
 

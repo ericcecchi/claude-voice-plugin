@@ -10,7 +10,7 @@ SCRIPTS = pathlib.Path(__file__).resolve().parent.parent / "scripts"
 def undefined_names(path):
     """Names read somewhere in the file but never bound anywhere in it (a coarse NameError check)."""
     tree = ast.parse(path.read_text())
-    bound = set(dir(builtins))
+    bound = set(dir(builtins)) | {"__file__", "__name__"}  # module globals every script has
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             bound.add(node.name)

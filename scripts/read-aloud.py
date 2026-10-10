@@ -565,11 +565,23 @@ def _read(path):
         return f.read()
 
 
+def _version():
+    try:
+        manifest = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                ".claude-plugin", "plugin.json")
+        return json.loads(_read(manifest)).get("version", "?")
+    except (OSError, ValueError):
+        return "?"
+
+
+VERSION = _version()  # stamped on each log line, to tell which version spoke
+
+
 def log(kind, engine, text):
     """One line per utterance in ~/.claude/read-aloud.log: which hook, which engine, what was said."""
     try:
         with open(LOG, "a") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {kind:<8} {engine:<6} {text[:200]}\n")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {kind:<8} {engine:<6} v{VERSION:<7} {text[:200]}\n")
     except OSError:
         pass
 

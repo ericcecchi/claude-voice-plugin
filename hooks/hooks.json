@@ -8,7 +8,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/read-aloud.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.py\"",
             "timeout": 120,
             "async": true
           }
@@ -20,12 +20,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/read-aloud.py\" toggle",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.py\" toggle",
             "timeout": 10
           },
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/read-aloud.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.py\"",
             "timeout": 20,
             "async": true
           }
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/read-aloud.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.py\"",
             "timeout": 30,
             "async": true
           }
@@ -50,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/read-aloud.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/launch.py\"",
             "timeout": 15,
             "async": true
           }
