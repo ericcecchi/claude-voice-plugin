@@ -9,6 +9,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -215,7 +216,64 @@ class ElevenLabs(Toggle):
                 mock.patch.object(self.ra, "kokoro_send", lambda t: sent.append(t)):
             self.context("/read-aloud engine elevenlabs")
             self.real_speak("Hello there.")
-        self.assertEqual(sent, ["\x00stop", "Hello there."])
+        self.assertEqual(sent, ["\x00kind=reply\x00Hello there."])
+
+
+class Queueing(Base):
+    """Lines wait for the one playing instead of cutting it off (unless interrupt is on)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ra.save_setting("engine", "system")
+        self.started = []
+        self.ra.start_player = lambda argv: self.started.append(argv[-1])
+        self.ra.tts_command = lambda text: ["say", text]
+        self.playing = [True]
+        self.ra.playing_pid = lambda: 4242 if self.playing[0] else None
+        self.killed = []
+        self.ra.stop_playing = lambda: self.killed.append(True)
+
+    def test_a_reaction_is_dropped_while_something_plays(self):
+        self.real_speak("On it.", "ack")
+        self.assertEqual(self.started, [])
+
+    def test_a_reply_waits_for_the_line_playing(self):
+        timer = threading.Timer(0.5, lambda: self.playing.__setitem__(0, False))
+        timer.start()
+        t = time.time()
+        self.real_speak("All done.", "reply")
+        self.assertEqual(self.started, ["All done."])
+        self.assertGreaterEqual(time.time() - t, 0.4)
+        self.assertEqual(self.killed, [])
+
+    def test_gives_up_after_its_wait(self):
+        self.ra.WAIT["progress"] = 0.3
+        self.real_speak("Still working.", "progress")
+        self.assertEqual(self.started, [])
+
+    def test_interrupt_on_cuts_off_instead(self):
+        self.ra.save_setting("interrupt", True)
+        self.real_speak("On it.", "ack")
+        self.assertEqual((self.killed, self.started), ([True], ["On it."]))
+
+    def test_interrupt_command(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.ra.toggle({"prompt": "/read-aloud interrupt on", "session_id": "s1"})
+        self.assertIn("now ON", out.getvalue())
+        self.assertTrue(self.ra.settings()["interrupt"])
+
+    def test_two_waiting_lines_take_turns(self):
+        self.playing[0] = False
+        order = []
+        def fake_start(argv):
+            order.append(("start", argv[-1]))
+            self.playing[0] = True  # it plays for a moment
+            threading.Timer(0.3, lambda: (order.append(("end", argv[-1])), self.playing.__setitem__(0, False))).start()
+        self.ra.start_player = fake_start
+        a = threading.Thread(target=self.real_speak, args=("First.", "reply"))
+        b = threading.Thread(target=self.real_speak, args=("Second.", "reply"))
+        a.start(); time.sleep(0.05); b.start(); a.join(); b.join(); time.sleep(0.4)
+        self.assertEqual([e for e, _ in order], ["start", "end", "start", "end"])
 
 
 class Summarize(Base):

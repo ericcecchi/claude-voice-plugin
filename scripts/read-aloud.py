@@ -31,7 +31,7 @@ Environment:
 Each utterance is logged to ~/.claude/read-aloud.log (hook, engine, text).
 Global off switch: touch ~/.claude/read-aloud.off
 """
-import json, os, random, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
+import contextlib, fcntl, json, os, random, re, shutil, signal, socket, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 
 DIRS = [os.path.normpath(os.path.expanduser(d)) + "/"
         for d in os.environ.get("READ_ALOUD_DIRS", "").split(":") if d.strip()]
@@ -134,6 +134,7 @@ DEFAULTS = {
     "reactions": True,  # the short spoken reaction when a prompt is sent
     "speed": float(os.environ.get("KOKORO_SPEED", "1.2")),
     "voice": os.environ.get("KOKORO_VOICE", "af_heart"),  # used by the Kokoro server
+    "interrupt": False,  # False: a new line waits for the one playing; True: it cuts it off
     "engine": "kokoro",  # kokoro (Kokoro when its server runs, else the system voice), elevenlabs, system
     "elevenlabs_voice": "JBFqnCBsd6RMkjVDRZzb",  # ElevenLabs' default "George"
     "elevenlabs_voice_name": "George",
@@ -340,14 +341,16 @@ def save_setting(key, value):
         json.dump(current, f, indent=2)
 
 
-SETTING_NAMES = {"updates": "updates", "update": "updates", "progress": "updates",
+SETTING_NAMES = {"interrupt": "interrupt", "interrupts": "interrupt",
+                 "updates": "updates", "update": "updates", "progress": "updates",
                  "reactions": "reactions", "reaction": "reactions", "acks": "reactions", "ack": "reactions"}
 
 
 def describe(s):
     voice = s["elevenlabs_voice_name"] if s["engine"] == "elevenlabs" else s["voice"]
     return (f"voice for this session is {{voice}}; mid-task updates {'on' if s['updates'] else 'off'}; "
-            f"reactions {'on' if s['reactions'] else 'off'}; speed {s['speed']:g}x; engine {s['engine']}; "
+            f"reactions {'on' if s['reactions'] else 'off'}; interrupt {'on' if s['interrupt'] else 'off'}; "
+            f"speed {s['speed']:g}x; engine {s['engine']}; "
             f"voice {voice}" + (f"; model {s['elevenlabs_model']}" if s["engine"] == "elevenlabs" else ""))
 
 
@@ -360,6 +363,7 @@ def toggle(event):
     """Sync UserPromptSubmit hook for `/read-aloud`:
       (nothing) | on | off        voice for this session
       updates|reactions [on|off]  mid-task updates / the spoken reaction, saved for every session
+      interrupt [on|off]          whether new speech cuts off what's playing (default off: it waits)
       speed <0.5-2.0>             speaking speed, saved for every session
       engine kokoro|elevenlabs|system   what speaks, saved for every session
       model <id>                  the ElevenLabs model (eleven_v4, eleven_v4_turbo…), saved
@@ -384,8 +388,9 @@ def toggle(event):
         key = SETTING_NAMES[args[0]]
         want = flag.get(args[1], not settings()[key]) if len(args) > 1 else not settings()[key]
         save_setting(key, want)
-        what = "Mid-task updates" if key == "updates" else "Spoken reactions to new prompts"
-        note = f"{what} are now {'ON' if want else 'OFF'} (saved for every session)."
+        what = {"updates": "Mid-task updates", "reactions": "Spoken reactions to new prompts",
+                "interrupt": "Interrupting (new speech cutting off what's playing)"}[key]
+        note = f"{what} {'is' if key == 'interrupt' else 'are'} now {'ON' if want else 'OFF'} (saved for every session)."
     elif args[0] == "speed" and len(args) > 1:
         try:
             speed = round(min(2.0, max(0.5, float(args[1].rstrip("x")))), 2)
@@ -438,7 +443,7 @@ def toggle(event):
         note = "Read-aloud settings."
     else:
         note = (f"'{' '.join(args)}' isn't a read-aloud option. Options: on, off, updates on|off, "
-                "reactions on|off, speed <0.5-2.0>, engine kokoro|elevenlabs|system, voice <name>, voices, "
+                "reactions on|off, interrupt on|off, speed <0.5-2.0>, engine kokoro|elevenlabs|system, voice <name>, voices, "
                 "model <id>, settings.")
     now = describe(settings()).format(voice="on" if voice_on(sid) else "off")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
@@ -620,8 +625,8 @@ def elevenlabs_voices_list():
         ". Use /read-aloud voice <name>."
 
 
-def elevenlabs_speak(s):
-    """Synthesize s with ElevenLabs and start playing it; returns the player's argv[0] or raises."""
+def elevenlabs_audio(s):
+    """Synthesize s with ElevenLabs; returns (mp3 path, playback rate) or raises."""
     if not elevenlabs_key():
         raise RuntimeError("no ElevenLabs API key")
     cfg = settings()
@@ -630,22 +635,94 @@ def elevenlabs_speak(s):
     # within ElevenLabs' 0.7-1.2.
     local = cfg["elevenlabs_model"].startswith("eleven_v4")
     api_speed = 1.0 if local else round(min(1.2, max(0.7, cfg["speed"])), 2)
-    rate = cfg["speed"] if local else 1.0
     audio = elevenlabs_request(
         f"/text-to-speech/{cfg['elevenlabs_voice']}?output_format=mp3_44100_128",
         {"text": s, "model_id": cfg["elevenlabs_model"], "voice_settings": {"speed": api_speed}})
-    path = os.path.join(tempfile.gettempdir(), "read-aloud-elevenlabs.mp3")
-    with open(path, "wb") as f:
+    folder = os.path.join(tempfile.gettempdir(), "read-aloud")
+    os.makedirs(folder, exist_ok=True)
+    for old in os.listdir(folder):  # lines queued earlier, long since played
+        try:
+            if time.time() - os.path.getmtime(os.path.join(folder, old)) > 600:
+                os.unlink(os.path.join(folder, old))
+        except OSError:
+            pass
+    fd, path = tempfile.mkstemp(suffix=".mp3", dir=folder)  # its own file, so a queued line can't
+    with os.fdopen(fd, "wb") as f:                          # overwrite one that's still playing
         f.write(audio)
+    return path, (cfg["speed"] if local else 1.0)
+
+
+def play_mp3(path, rate):
+    """Start playing an mp3; returns the player's name or raises."""
     for player in (["afplay", "-r", f"{rate:g}", "-q", "1", path],  # -q 1: time-stretch, not chipmunk
                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", "-af", f"atempo={rate:g}", path],
                    ["mpg123", "-q", path]):
         if shutil.which(player[0]):
-            p = subprocess.Popen(player, start_new_session=True)
-            with open(PIDFILE, "w") as f:
-                f.write(str(p.pid))
+            start_player(player)
             return player[0]
     raise RuntimeError("no audio player for mp3 (afplay, ffplay or mpg123)")
+
+
+def start_player(argv):
+    p = subprocess.Popen(argv, start_new_session=True)
+    with open(PIDFILE, "w") as f:
+        f.write(str(p.pid))
+
+
+PLAYERS = {"afplay", "ffplay", "mpg123", "say", "spd-say", "espeak", "espeak-ng"}
+# How long each kind of line waits for the one playing to finish. A reaction is only worth
+# hearing right away, so it's dropped instead; a reply waits nearly as long as its hook may run.
+WAIT = {"ack": 0, "progress": 10, "question": 25, "reply": 100}
+
+
+def playing_pid():
+    """The pid of a line still playing (afplay, say…), or None."""
+    try:
+        pid = int(_read(PIDFILE))
+        os.kill(pid, 0)
+        comm = subprocess.run(["ps", "-p", str(pid), "-o", "comm="], capture_output=True, text=True).stdout
+        return pid if os.path.basename(comm.strip()) in PLAYERS else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+TURN_LOCK = os.path.expanduser("~/.claude/read-aloud.turn")
+
+
+@contextlib.contextmanager
+def turn(kind):
+    """Yields True once this line may start: no other line is starting and none is playing (waiting
+    up to WAIT[kind]); False if that didn't happen in time. One line at a time holds the lock, so
+    two lines waiting on the same one can't both start when it ends."""
+    deadline = time.time() + WAIT.get(kind, 25)
+    with open(TURN_LOCK, "a") as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.1)
+        try:
+            while playing_pid():
+                if time.time() >= deadline:
+                    yield False
+                    return
+                time.sleep(0.2)
+            yield True
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def stop_playing():
+    pid = playing_pid()
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
 
 
 def kokoro_send(text):
@@ -657,32 +734,38 @@ def kokoro_send(text):
 
 
 def speak(s, kind="reply"):
-    try:  # a fallback `say` still talking; the pid file goes once it's used, so a reused pid is safe
-        pid = int(_read(PIDFILE))
-        os.unlink(PIDFILE)
-        os.kill(pid, signal.SIGTERM)
-    except (OSError, ValueError):
-        pass
-    try:
-        with open(LAST_SPOKE, "w") as f:
-            f.write(str(time.time()))
-    except OSError:
-        pass
-    engine = settings()["engine"]
+    """Say s with the configured engine. By default a line waits for the one playing to finish
+    (a reaction that would have to wait is dropped); `/read-aloud interrupt on` cuts it off instead."""
+    cfg = settings()
+    interrupt = cfg["interrupt"]
+    if interrupt:
+        stop_playing()
+
+    def start(begin, engine_name):
+        """Run begin() when it's this line's turn (at once when interrupting)."""
+        with (contextlib.nullcontext(True) if interrupt else turn(kind)) as ok:
+            if not ok:
+                log(kind, "-", f"skipped, something was still playing: {s}")
+                return
+            try:
+                with open(LAST_SPOKE, "w") as f:
+                    f.write(str(time.time()))
+            except OSError:
+                pass
+            begin()
+            log(kind, engine_name, s)
+
+    engine = cfg["engine"]
     if engine == "elevenlabs":
         try:
-            kokoro_send("\x00stop")  # Kokoro may still be reading the last line
-        except OSError:
-            pass
-        try:
-            elevenlabs_speak(s)
-            log(kind, "eleven", s)
+            path, rate = elevenlabs_audio(s)  # synthesize while the line before is still playing
+            start(lambda: play_mp3(path, rate), "eleven")
             return
         except Exception as e:
             log(kind, "-", f"ElevenLabs failed ({type(e).__name__}: {e}); falling back")
     if engine != "system":
-        try:  # the warm Kokoro server (kokoro-speak-server.py); it cuts off its own previous speech
-            kokoro_send(s)
+        try:  # the warm Kokoro server queues (or cuts off) by itself, the same way
+            kokoro_send(f"\x00kind={kind}\x00{s}")
             log(kind, "kokoro", s)
             return
         except OSError:
@@ -691,10 +774,7 @@ def speak(s, kind="reply"):
     if not argv:
         log(kind, "none", "no speech engine found (say, spd-say or espeak)")
         return
-    p = subprocess.Popen(argv, start_new_session=True)
-    with open(PIDFILE, "w") as f:
-        f.write(str(p.pid))
-    log(kind, os.path.basename(argv[0]), s)
+    start(lambda: start_player(argv), os.path.basename(argv[0]))
 
 
 def tts_command(s):

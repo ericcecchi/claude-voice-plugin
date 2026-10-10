@@ -3,7 +3,9 @@
 
 Loads Kokoro-82M once and keeps it in memory. It listens on a Unix socket (~/.claude/kokoro.sock),
 takes UTF-8 text, synthesizes it, and plays it with `afplay`, sentence by sentence, so long text
-starts at once. A new request cuts off the one still playing; the text "\\x00stop" only cuts it off.
+starts at once. Lines queue, one after another; a reaction that would have to wait is dropped.
+With `/read-aloud interrupt on` a new line cuts off the one playing instead. "\\x00stop" only cuts
+it off; "\\x00kind=<kind>\\x00<text>" says what kind of line the text is.
 When this server isn't running, the hook falls back to macOS `say`.
 
 Needs a Python venv with `kokoro soundfile numpy torch` and `brew install espeak-ng`. See the
@@ -18,6 +20,7 @@ Environment:
 import itertools
 import json
 import os
+import queue
 import shutil
 import socket
 import subprocess
@@ -162,15 +165,39 @@ def stop() -> int:
         return generation
 
 
-def start(text: str) -> None:
-    """Cut off whatever is playing and read text instead."""
-    gen = stop()
-    def run() -> None:
+lines: "queue.Queue[tuple[str, int]]" = queue.Queue()
+busy = threading.Event()  # set while a line is being synthesized or played
+
+
+def start(text: str, kind: str = "reply") -> None:
+    """Read text. With `/read-aloud interrupt on`, cut off whatever is playing first; otherwise
+    queue it behind the line playing, except a reaction ("ack"), which is dropped if it would wait."""
+    if setting("interrupt", False) is True:
+        lines.put((text, stop()))
+        return
+    if kind == "ack" and (busy.is_set() or not lines.empty()):
+        print(f"skipped a reaction while speaking: {text[:60]}", flush=True)
+        return
+    lines.put((text, generation))
+
+
+def worker() -> None:
+    """Reads queued lines one after another."""
+    while True:
+        text, gen = lines.get()
+        if gen != generation:  # queued before an interrupt
+            continue
+        busy.set()
         try:
             speak(text, gen)
+            with lock:
+                last = player
+            if last:
+                last.wait()  # its final segment, too, before the next line
         except Exception as e:  # keep serving
             print(f"speak failed: {e}", flush=True)
-    threading.Thread(target=run, daemon=True).start()
+        finally:
+            busy.clear()
 
 
 def main() -> None:
@@ -182,6 +209,7 @@ def main() -> None:
     srv.bind(SOCK)
     os.chmod(SOCK, 0o600)
     srv.listen(4)
+    threading.Thread(target=worker, daemon=True).start()
     print("kokoro-speak ready", flush=True)
     while True:
         conn, _ = srv.accept()
@@ -190,10 +218,13 @@ def main() -> None:
             while chunk := conn.recv(65536):
                 data += chunk
         text = data.decode("utf-8", "replace").strip()
+        kind = "reply"
+        if text.startswith("\x00kind="):  # "\x00kind=ack\x00<text>" from the hook
+            kind, _, text = text[len("\x00kind="):].partition("\x00")
         if text == "\x00stop":  # another engine is about to speak
             stop()
         elif text and text != "ping":
-            start(text)
+            start(text, kind)
 
 
 if __name__ == "__main__":
