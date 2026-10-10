@@ -58,12 +58,15 @@ export const register: Register = on => {
   })
 
   // Desktop and other surfaces: the footer slots aren't on screen there, so the button sits in
-  // the band just above the prompt, at its right edge. It gives way to a survey.
+  // the band just above the prompt, at its right edge, beside whatever other mods draw there.
+  // It gives way to a survey.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.surface === 'terminal' || e.props.hasSurvey) return next(e)
+    const base = await next(e)
+    if (e.surface === 'terminal' || e.props.hasSurvey) return base
     const { Box } = $.ui.resolve(e)
     return (
-      <Box flexDirection="row" justifyContent="flex-end">
+      <Box flexDirection="row" alignItems="center">
+        <Box flexGrow={1}>{base}</Box>
         {await control($, e)}
       </Box>
     )

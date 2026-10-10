@@ -41,3 +41,15 @@ test('on desktop the footer slot stays as it was, and a survey takes the band', 
   expect(await band.find({ key: 'voice' })).toBeUndefined()
   await band.unmount()
 })
+
+test('on desktop the band keeps what other mods draw there', async ($, on) => {
+  mock.env(on, { HOME: '/home' })
+  mock.clock(on)
+  on('ui.render', ($, e) => { const { Button } = $.ui.resolve(e); return <Button key="other" label="Other mod" onPress={() => {}} /> })
+  on('session.id', () => ({ value: 's1' }))
+  on('fs.exists', () => ({ value: false }))
+  const band = await $.ui.mount({ plugin: 'read-aloud', surface: 'desktop', ...SITES.desktop } as never)
+  expect(await band.find({ key: 'other' })).toBeDefined()
+  expect(await band.find({ key: 'voice' })).toBeDefined()
+  await band.unmount()
+})
