@@ -6,7 +6,7 @@ A Claude Code plugin that reads Claude's replies out loud, so you can look away 
 - **Off by default.** `/read-aloud` toggles it for the current session; `/read-aloud on` and `/read-aloud off` set it. A **Voice on / Voice off** button does the same: just above the prompt in the desktop app, in the prompt footer in the terminal (experimental, see below).
 - **Replies:** when Claude finishes, Claude Haiku sums up the final message for the ear, warmer and more conversational than the written reply: the outcome, anything you need to do or decide, and any question for you, at a length that fits. Short replies are read as they are. If Haiku is slow or missing, it reads the message minus code, tables and pleasantries.
 - **Acknowledgment:** a beat after you send a prompt, it reacts out loud in a sentence or two, so there's no dead air. The line comes from Claude Haiku (through `claude -p`, on your Claude login); if Haiku is slow or missing, from a local [Ollama](https://ollama.com) model; otherwise it's a canned one.
-- **Updates (off by default):** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
+- **Updates:** on long tasks, it reads what Claude last wrote between tool calls (each line once), but only after 20 seconds of quiet, so short turns stay quiet.
 - **Questions:** when an `AskUserQuestion` prompt opens, it gives a short heads-up.
 - **Voice:** a warm [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) server if one is running, otherwise the system voice: `say` on macOS, `spd-say` or `espeak` on Linux. Or [ElevenLabs](https://elevenlabs.io), with your own API key. A new line waits for the one playing to finish, unless you turn on `interrupt`.
 
@@ -40,11 +40,11 @@ These are saved for every session (in `~/.claude/read-aloud/config.json`):
 
 | Command | Default | What it does |
 |---|---|---|
-| `/read-aloud updates on\|off` | off | Mid-task updates on long turns. |
+| `/read-aloud updates on\|off` | on | Mid-task updates on long turns. |
 | `/read-aloud reactions on\|off` | on | The short spoken reaction when you send a prompt. |
 | `/read-aloud interrupt on\|off` | off | Off: a new line waits for the one playing to finish (a reaction that would have to wait is skipped). On: new speech cuts off what's playing. |
 | `/read-aloud speed 1.3` | `1.2` | Speaking speed, 0.5 to 2.0, for Kokoro and the system voice. |
-| `/read-aloud engine elevenlabs` | `kokoro` | What speaks: `kokoro` (Kokoro when its server runs, else the system voice), `elevenlabs`, or `system`. |
+| `/read-aloud engine kokoro` | `elevenlabs` | What speaks: `elevenlabs` (with an API key; without one, Kokoro), `kokoro` (Kokoro when its server runs, else the system voice), or `system`. |
 | `/read-aloud rotate on\|off` | on | Each new session gets its own voice, so you can tell sessions apart by ear. Off: every session uses the default voice. |
 | `/read-aloud voice heart` | | This session's voice only: a Kokoro name (`heart`, `emma`, `am_fenrir`), or an ElevenLabs name (`George`, `Sarah`) or voice id. |
 | `/read-aloud default-voice heart` | `af_heart` / George | The voice sessions use when rotate is off. |

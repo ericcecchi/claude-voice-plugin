@@ -39,6 +39,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.ra = load(self.home)
+        self.ra.elevenlabs_key = lambda: ""  # never the real Keychain in tests
         self.real_speak = self.ra.speak
         self.said = []
 
@@ -87,7 +88,8 @@ class Settings(Toggle):
 
     def test_defaults(self):
         s = self.ra.settings()
-        self.assertEqual((s["updates"], s["reactions"], s["speed"], s["voice"]), (False, True, 1.2, "af_heart"))
+        self.assertEqual((s["updates"], s["reactions"], s["speed"], s["voice"], s["engine"]),
+                         (True, True, 1.2, "af_heart", "elevenlabs"))
 
     def test_updates_and_reactions(self):
         self.assertIn("now ON", self.context("/read-aloud updates on"))
@@ -202,9 +204,8 @@ class ElevenLabs(Toggle):
         vid = "pNInz6obpgDQGcFmaJgB"
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: ""):
             note = self.context(f"/read-aloud voice {vid}")
-        self.assertIn("once the engine is elevenlabs", note)
+        self.assertIn("once the engine is elevenlabs", note)  # without a key, Kokoro speaks
         self.assertEqual(self.ra.session_voice("s1", "elevenlabs")[0], vid)
-        self.assertEqual(self.ra.settings()["engine"], "kokoro")
 
     def test_unknown_voice_lists_the_account(self):
         with mock.patch.object(self.ra, "elevenlabs_key", lambda: "k"):
@@ -400,7 +401,7 @@ class Progress(Base):
         super().setUp()
         self.ra.save_setting("updates", True)
 
-    def test_off_by_default(self):
+    def test_updates_off(self):
         self.ra.save_setting("updates", False)
         self.write(user("go"), assistant("1", "Found the files."))
         self.ra.progress(self.event())
